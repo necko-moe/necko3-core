@@ -1,9 +1,8 @@
 use chrono::{DateTime, Utc};
+use alloy::primitives::{TxHash, U256};
 use serde::{Deserialize, Serialize};
 use strum::{AsRefStr, Display, EnumString};
 use utoipa::ToSchema;
-
-pub use alloy::primitives::{TxHash, U256};
 
 #[derive(Debug, Clone)]
 pub struct PaymentEvent {

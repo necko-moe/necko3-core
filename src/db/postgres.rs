@@ -129,12 +129,12 @@ impl Postgres {
             _ => anyhow::bail!("Unknown invoice status in DB: {}", status_str),
         };
 
-        let amount_bd: BigDecimal = row.get("amount_raw");
-        let paid_bd: BigDecimal = row.get("paid_raw");
+        let amount_bd: String = row.get("amount_raw");
+        let paid_bd: String = row.get("paid_raw");
 
-        let amount_raw = U256::from_str(&amount_bd.to_string())
+        let amount_raw = U256::from_str(&amount_bd)
             .map_err(|e| anyhow::anyhow!("Failed to parse amount_raw: {}", e))?;
-        let paid_raw = U256::from_str(&paid_bd.to_string())
+        let paid_raw = U256::from_str(&paid_bd)
             .map_err(|e| anyhow::anyhow!("Failed to parse paid_raw: {}", e))?;
 
         let network: String = row.get("network");
@@ -515,7 +515,12 @@ impl DatabaseAdapter for Postgres {
     }
 
     async fn get_invoices(&self) -> anyhow::Result<Vec<Invoice>> {
-        let rows = sqlx::query("SELECT * FROM invoices")
+        let rows = sqlx::query(
+            r#"SELECT
+                       id, address, address_index, network, token, amount_raw::TEXT, paid_raw::TEXT,
+                       status, decimals, created_at, expires_at
+                   FROM invoices"#
+        )
             .fetch_all(&self.pool)
             .await?;
 
@@ -523,7 +528,12 @@ impl DatabaseAdapter for Postgres {
     }
 
     async fn get_invoices_by_chain(&self, chain_name: &str) -> anyhow::Result<Vec<Invoice>> {
-        let rows = sqlx::query("SELECT * FROM invoices WHERE network = $1")
+        let rows = sqlx::query(
+            r#"SELECT
+                       id, address, address_index, network, token, amount_raw::TEXT, paid_raw::TEXT,
+                       status, decimals, created_at, expires_at
+                   FROM invoices WHERE network = $1"#
+        )
             .bind(chain_name)
             .fetch_all(&self.pool)
             .await?;
@@ -532,7 +542,12 @@ impl DatabaseAdapter for Postgres {
     }
 
     async fn get_invoices_by_token(&self, token_symbol: &str) -> anyhow::Result<Vec<Invoice>> {
-        let rows = sqlx::query("SELECT * FROM invoices WHERE token = $1")
+        let rows = sqlx::query(
+            r#"SELECT
+                       id, address, address_index, network, token, amount_raw::TEXT, paid_raw::TEXT,
+                       status, decimals, created_at, expires_at
+                   FROM invoices WHERE token = $1"#
+        )
             .bind(token_symbol)
             .fetch_all(&self.pool)
             .await?;
@@ -541,7 +556,12 @@ impl DatabaseAdapter for Postgres {
     }
 
     async fn get_invoices_by_address(&self, address: &str) -> anyhow::Result<Vec<Invoice>> {
-        let rows = sqlx::query("SELECT * FROM invoices WHERE address = $1")
+        let rows = sqlx::query(
+            r#"SELECT
+                       id, address, address_index, network, token, amount_raw::TEXT, paid_raw::TEXT,
+                       status, decimals, created_at, expires_at
+                   FROM invoices WHERE address = $1"#
+        )
             .bind(address)
             .fetch_all(&self.pool)
             .await?;
@@ -552,7 +572,12 @@ impl DatabaseAdapter for Postgres {
     async fn get_invoice(&self, uuid: &str) -> anyhow::Result<Option<Invoice>> {
         let uuid_parsed = uuid::Uuid::parse_str(uuid)?;
 
-        let row = sqlx::query("SELECT * FROM invoices WHERE id = $1")
+        let row = sqlx::query(
+            r#"SELECT
+                       id, address, address_index, network, token, amount_raw::TEXT, paid_raw::TEXT,
+                       status, decimals, created_at, expires_at
+                   FROM invoices WHERE id = $1"#
+        )
             .bind(uuid_parsed)
             .fetch_optional(&self.pool)
             .await?;
@@ -564,7 +589,12 @@ impl DatabaseAdapter for Postgres {
     }
 
     async fn get_invoices_by_status(&self, status: InvoiceStatus) -> anyhow::Result<Vec<Invoice>> {
-        let rows = sqlx::query("SELECT * FROM invoices WHERE status = $1")
+        let rows = sqlx::query(
+            r#"SELECT
+                       id, address, address_index, network, token, amount_raw::TEXT, paid_raw::TEXT,
+                       status, decimals, created_at, expires_at
+                   FROM invoices WHERE status = $1"#
+        )
             .bind(status.to_string())
             .fetch_all(&self.pool)
             .await?;
@@ -576,7 +606,10 @@ impl DatabaseAdapter for Postgres {
         -> anyhow::Result<Vec<Invoice>>
     {
         let rows = sqlx::query(
-            "SELECT * FROM invoices WHERE network = $1 AND status = $2"
+            r#"SELECT
+                       id, address, address_index, network, token, amount_raw::TEXT, paid_raw::TEXT,
+                       status, decimals, created_at, expires_at
+                   FROM invoices WHERE network = $1 AND status = $2"#
         )
             .bind(chain_name)
             .bind(status.to_string())
@@ -590,7 +623,10 @@ impl DatabaseAdapter for Postgres {
         -> anyhow::Result<Vec<Invoice>>
     {
         let rows = sqlx::query(
-            "SELECT * FROM invoices WHERE address = $1 AND status = $2"
+            r#"SELECT
+                       id, address, address_index, network, token, amount_raw::TEXT, paid_raw::TEXT,
+                       status, decimals, created_at, expires_at
+                   FROM invoices WHERE address = $1 AND status = $1"#
         )
             .bind(address)
             .bind(status.to_string())
@@ -665,7 +701,7 @@ impl DatabaseAdapter for Postgres {
             r#"UPDATE invoices
                    SET paid_raw = paid_raw + $1
                    WHERE id = $2
-                   RETURNING paid_raw, decimals"#
+                   RETURNING paid_raw::TEXT, decimals"#
         )
             .bind(added_amount_bd)
             .bind(uuid_parsed)
@@ -675,8 +711,8 @@ impl DatabaseAdapter for Postgres {
         let row = row.ok_or_else(|| anyhow::anyhow!("Invoice {} not found", uuid))?;
 
         let new_paid_u256 = {
-            let np_bd: BigDecimal = row.get("paid_raw");
-            U256::from_str(&np_bd.to_string())
+            let np_bd: String = row.get("paid_raw");
+            U256::from_str(&np_bd)
                 .context("Failed to parse result paid_raw")?
         };
         let decimals = row.get::<i16, _>("decimals") as u8;
@@ -690,7 +726,10 @@ impl DatabaseAdapter for Postgres {
         -> anyhow::Result<Option<Invoice>>
     {
         let row = sqlx::query(
-            "SELECT * FROM invoices WHERE network = $1 AND address = $2 AND status = 'Pending'"
+            r#"SELECT
+                       id, address, address_index, network, token, amount_raw::TEXT, paid_raw::TEXT,
+                       status, decimals, created_at, expires_at
+                   FROM invoices WHERE network = $1 AND address = $2 AND status = 'Pending'"#
         )
             .bind(chain_name)
             .bind(address)
