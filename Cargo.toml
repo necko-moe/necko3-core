@@ -1,0 +1,25 @@
+[package]
+name = "necko3-core"
+version = "1.0.0"
+edition = "2024"
+
+[dependencies]
+tokio = { version = "1.49", features = ["full"] }
+anyhow = "1"
+
+url = "2.5"
+
+alloy = { version = "1.6", features = ["full"] }
+coins-bip32 = "0.13"
+
+serde = { version = "1", features = ["derive"] }
+chrono = { version = "0.4", features = ["serde"] }
+dashmap = "6.1"
+uuid = { version = "1.20", features = ["v4"] }
+
+sqlx = { version = "0.8", features = [
+    "runtime-tokio", "tls-rustls", "postgres", "uuid", "chrono", "bigdecimal"] }
+
+utoipa = { version = "5.4", features = ["axum_extras", "chrono", "uuid"] }
+
+strum = { version = "0.27", features = ["derive"] }
