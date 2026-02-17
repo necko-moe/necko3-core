@@ -1,27 +1,20 @@
 use crate::chain::evm::EvmBlockchain;
 use crate::chain::Blockchain::Evm;
-use crate::model::PaymentEvent;
-use crate::state::AppState;
-use serde::{Deserialize, Serialize};
-use std::sync::Arc;
-use strum::{AsRefStr, Display, EnumString};
+use crate::db::Database;
+use crate::model::{ChainConfig, ChainType, PaymentEvent};
+use std::sync::{Arc, RwLock};
 use tokio::sync::mpsc::Sender;
-use utoipa::ToSchema;
 
 pub mod evm;
 
-#[derive(Debug, Copy, Clone, Serialize, Deserialize, ToSchema,
-    Display, EnumString, AsRefStr)]
-#[strum(serialize_all = "UPPERCASE")]
-pub enum ChainType {
-    EVM
-}
-
 pub trait BlockchainAdapter: Sync + Send {
-    fn new(state: Arc<AppState>, chain_type: ChainType, chain_name: &str, 
-           sender: Option<Sender<PaymentEvent>>) -> Self;
+    fn new(chain_config: ChainConfig) -> anyhow::Result<Self> where Self: Sized;
     fn derive_address(&self, index: u32) -> impl Future<Output = anyhow::Result<String>> + Send;
-    fn listen(&self) -> impl Future<Output = anyhow::Result<()>> + Send;
+    fn listen(&self, db: Arc<Database>, sender: Sender<PaymentEvent>)
+        -> impl Future<Output = anyhow::Result<()>> + Send;
+    fn get_tx_block_number(&self, tx_hash: &str)
+                           -> impl Future<Output = anyhow::Result<Option<u64>>> + Send;
+    fn config(&self) -> Arc<RwLock<ChainConfig>>;
 }
 
 #[derive(Clone)]
@@ -30,9 +23,9 @@ pub enum Blockchain {
 }
 
 impl BlockchainAdapter for Blockchain {
-    fn new(state: Arc<AppState>, chain_type: ChainType, chain_name: &str, sender: Option<Sender<PaymentEvent>>) -> Self {
-        match chain_type {
-            ChainType::EVM => Evm(EvmBlockchain::new(state, chain_type, chain_name, sender))
+    fn new(chain_config: ChainConfig) -> anyhow::Result<Self> {
+        match chain_config.chain_type {
+            ChainType::EVM => Ok(Evm(EvmBlockchain::new(chain_config)?))
         }
     }
 
@@ -42,9 +35,21 @@ impl BlockchainAdapter for Blockchain {
         }
     }
 
-    async fn listen(&self) -> anyhow::Result<()> {
+    async fn listen(&self, db: Arc<Database>, sender: Sender<PaymentEvent>) -> anyhow::Result<()> {
         match self {
-            Evm(bc) => bc.listen().await,
+            Evm(bc) => bc.listen(db, sender).await,
+        }
+    }
+
+    async fn get_tx_block_number(&self, tx_hash: &str) -> anyhow::Result<Option<u64>> {
+        match self {
+            Evm(bc) => bc.get_tx_block_number(tx_hash).await,
+        }
+    }
+
+    fn config(&self) -> Arc<RwLock<ChainConfig>> {
+        match self {
+            Evm(bc) => bc.config(),
         }
     }
 }

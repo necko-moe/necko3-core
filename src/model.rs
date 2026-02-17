@@ -1,8 +1,60 @@
+use std::collections::HashSet;
+use std::sync::{Arc, RwLock};
 use chrono::{DateTime, Utc};
 use alloy::primitives::{TxHash, U256};
 use serde::{Deserialize, Serialize};
 use strum::{AsRefStr, Display, EnumString};
 use utoipa::ToSchema;
+
+#[derive(Debug, Clone, Eq, Hash, PartialEq, Deserialize, Serialize, ToSchema)]
+pub struct TokenConfig {
+    pub symbol: String,
+    pub contract: String,
+    pub decimals: u8,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct ChainConfig {
+    pub name: String,
+    pub rpc_url: String,
+    pub chain_type: ChainType,
+    pub xpub: String,
+    pub native_symbol: String,
+    pub decimals: u8,
+    pub last_processed_block: u64,
+    pub block_lag: u8,
+    pub required_confirmations: u64,
+
+    #[schema(ignore)]
+    #[serde(skip)]
+    pub watch_addresses: Arc<RwLock<HashSet<String>>>,
+
+    #[schema(ignore)]
+    #[serde(skip)]
+    pub tokens: Arc<RwLock<HashSet<TokenConfig>>>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct Payment {
+    pub id: String,
+    pub invoice_id: String,
+    pub from: String,
+    pub to: String,
+    pub network: String,
+    pub tx_hash: String,
+    #[schema(value_type = String, example = "1000000000000000000")]
+    pub amount_raw: U256,
+    pub block_number: u64,
+    pub status: PaymentStatus,
+    pub created_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Copy, Clone, Serialize, Deserialize, ToSchema,
+    Display, EnumString, AsRefStr)]
+#[strum(serialize_all = "UPPERCASE")]
+pub enum ChainType {
+    EVM
+}
 
 #[derive(Debug, Clone)]
 pub struct PaymentEvent {
@@ -14,6 +66,7 @@ pub struct PaymentEvent {
     pub amount: String,
     pub amount_raw: U256,
     pub decimals: u8,
+    pub block_number: u64,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, ToSchema,
@@ -23,6 +76,14 @@ pub enum InvoiceStatus {
     Pending,
     Paid,
     Expired,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, ToSchema,
+    Display, EnumString, AsRefStr)]
+#[strum(serialize_all = "PascalCase")]
+pub enum PaymentStatus {
+    Confirming,
+    Confirmed,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, ToSchema)]
@@ -50,4 +111,5 @@ pub struct PartialChainUpdate {
     pub last_processed_block: Option<u64>,
     pub xpub: Option<String>,
     pub block_lag: Option<u8>,
+    pub required_confirmations: Option<u64>,
 }

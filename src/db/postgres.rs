@@ -1,28 +1,26 @@
-use crate::config::{ChainConfig, TokenConfig};
+use crate::chain::{Blockchain, BlockchainAdapter};
 use crate::db::DatabaseAdapter;
-use crate::model::{Invoice, InvoiceStatus, PartialChainUpdate};
+use crate::model::{ChainConfig, ChainType, Invoice, InvoiceStatus, PartialChainUpdate, Payment, PaymentStatus, TokenConfig};
+use alloy::primitives::utils::format_units;
 use alloy::primitives::U256;
+use sqlx::postgres::PgRow;
+use sqlx::types::BigDecimal;
 use sqlx::{PgPool, Row};
 use std::collections::{HashMap, HashSet};
 use std::str::FromStr;
 use std::sync::{Arc, RwLock};
-use alloy::primitives::utils::format_units;
-use anyhow::Context;
-use sqlx::postgres::PgRow;
-use sqlx::types::BigDecimal;
-use crate::chain::ChainType;
 
 pub struct Postgres {
     pool: PgPool,
 
     // cache
-    chains_cache: RwLock<HashMap<String, ChainConfig>>, // key = chain name
+    chains_cache: RwLock<HashMap<String, Arc<Blockchain>>>, // key = chain name
     token_decimals: RwLock<HashMap<String, HashMap<String, u8>>> // (chain_name, (token_symbol, decimals))
 }
 
 impl Postgres {
     pub async fn init(pool: PgPool) -> anyhow::Result<Self> {
-        let mut chains_map: HashMap<String, ChainConfig> = HashMap::new();
+        let mut chains_map: HashMap<String, Arc<Blockchain>> = HashMap::new();
         let mut decimals_map: HashMap<String, HashMap<String, u8>> = HashMap::new();
 
         // cache this shit for tokens
@@ -30,7 +28,7 @@ impl Postgres {
 
         for row in sqlx::query(
             r#"SELECT id, name, rpc_url, chain_type, xpub, native_symbol, decimals,
-       last_processed_block, block_lag FROM chains"#
+       last_processed_block, block_lag, required_confirmations FROM chains"#
         )
             .fetch_all(&pool)
             .await?
@@ -51,6 +49,7 @@ impl Postgres {
                 decimals: row.get::<i16, _>("decimals") as u8,
                 last_processed_block: row.get::<i64, _>("last_processed_block") as u64,
                 block_lag: row.get::<i16, _>("block_lag") as u8,
+                required_confirmations: row.get::<i64, _>("required_confirmations") as u64,
                 watch_addresses: Arc::new(RwLock::new(HashSet::new())),
                 tokens: Arc::new(RwLock::new(HashSet::new())),
             };
@@ -61,7 +60,9 @@ impl Postgres {
                 .or_insert_with(HashMap::new)
                 .insert(config.native_symbol.clone(), config.decimals);
 
-            chains_map.insert(name.clone(), config);
+            let blockchain = Blockchain::new(config)?;
+
+            chains_map.insert(name.clone(), Arc::new(blockchain));
             chain_id_to_name.insert(id, name);
         }
 
@@ -78,7 +79,7 @@ impl Postgres {
                 None => continue, // unreachable because deleting chain causes token demolish
             };
 
-            let chain_config = chains_map.get(chain_name).unwrap(); // scary!
+            let blockchain = chains_map.get(chain_name).unwrap(); // scary!
 
             let symbol: String = row.get("symbol");
             let decimals = row.get::<i16, _>("decimals") as u8;
@@ -89,7 +90,8 @@ impl Postgres {
                 decimals,
             };
 
-            chain_config.tokens.write().unwrap().insert(token);
+            blockchain.config().read().unwrap()
+                .tokens.write().unwrap().insert(token);
 
             decimals_map
                 .entry(chain_name.clone())
@@ -106,8 +108,9 @@ impl Postgres {
             let network: String = row.get("network");
             let address: String = row.get("address");
 
-            if let Some(chain) = chains_map.get(&network) {
-                chain.watch_addresses.write().unwrap().insert(address);
+            if let Some(blockchain) = chains_map.get(&network) {
+                blockchain.config().read().unwrap()
+                    .watch_addresses.write().unwrap().insert(address);
             }
         }
 
@@ -129,12 +132,12 @@ impl Postgres {
             _ => anyhow::bail!("Unknown invoice status in DB: {}", status_str),
         };
 
-        let amount_bd: String = row.get("amount_raw");
-        let paid_bd: String = row.get("paid_raw");
+        let amount_str: String = row.get("amount_raw");
+        let paid_str: String = row.get("paid_raw");
 
-        let amount_raw = U256::from_str(&amount_bd)
+        let amount_raw = U256::from_str(&amount_str)
             .map_err(|e| anyhow::anyhow!("Failed to parse amount_raw: {}", e))?;
-        let paid_raw = U256::from_str(&paid_bd)
+        let paid_raw = U256::from_str(&paid_str)
             .map_err(|e| anyhow::anyhow!("Failed to parse paid_raw: {}", e))?;
 
         let network: String = row.get("network");
@@ -161,22 +164,50 @@ impl Postgres {
             expires_at: row.get("expires_at"),
         })
     }
+
+    fn map_row_to_payment(
+        row: PgRow
+    ) -> anyhow::Result<Payment> {
+        let status_str: String = row.get("status");
+        let status = match status_str.as_str() {
+            "Confirming" => PaymentStatus::Confirming,
+            "Confirmed" => PaymentStatus::Confirmed,
+            _ => anyhow::bail!("Unknown payment status in DB: {}", status_str),
+        };
+
+        let amount_bd: String = row.get("amount_raw");
+        let amount_raw = U256::from_str(&amount_bd)
+            .map_err(|e| anyhow::anyhow!("Failed to parse amount_raw: {}", e))?;
+
+        Ok(Payment {
+            id: row.get::<uuid::Uuid, _>("id").to_string(),
+            invoice_id: row.get::<uuid::Uuid, _>("invoice_id").to_string(),
+            from: row.get("from"),
+            to: row.get("to"),
+            network: row.get("network"),
+            tx_hash: row.get("tx_hash"),
+            amount_raw,
+            block_number: row.get::<i64, _>("block_number") as u64,
+            status,
+            created_at: row.get("created_at"),
+        })
+    }
 }
 
 impl DatabaseAdapter for Postgres {
-    async fn get_chains_map(&self) -> anyhow::Result<HashMap<String, ChainConfig>> {
+    async fn get_chains_map(&self) -> anyhow::Result<HashMap<String, Arc<Blockchain>>> {
         Ok(self.chains_cache.read().unwrap().clone())
     }
 
-    async fn get_chains(&self) -> anyhow::Result<Vec<ChainConfig>> {
+    async fn get_chains(&self) -> anyhow::Result<Vec<Arc<Blockchain>>> {
         Ok(self.chains_cache.read().unwrap().values().cloned().collect())
     }
 
-    async fn get_chain(&self, chain_name: &str) -> anyhow::Result<Option<ChainConfig>> {
+    async fn get_chain(&self, chain_name: &str) -> anyhow::Result<Option<Arc<Blockchain>>> {
         Ok(self.chains_cache.read().unwrap().get(chain_name).cloned())
     }
 
-    async fn get_chain_by_id(&self, id: u32) -> anyhow::Result<Option<ChainConfig>> {
+    async fn get_chain_by_id(&self, id: u32) -> anyhow::Result<Option<Arc<Blockchain>>> {
         let row = sqlx::query("SELECT name FROM chains WHERE id = $1")
             .bind(id as i32)
             .fetch_optional(&self.pool)
@@ -193,8 +224,8 @@ impl DatabaseAdapter for Postgres {
     async fn add_chain(&self, chain_config: &ChainConfig) -> anyhow::Result<()> {
         sqlx::query(
             r#"INSERT INTO chains (name, rpc_url, chain_type, xpub, native_symbol, decimals,
-                    last_processed_block)
-                    VALUES ($1, $2, $3, $4, $5, $6, $7)"#,
+                    last_processed_block, block_lag, required_confirmations)
+                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)"#,
         )
             .bind(&chain_config.name)
             .bind(&chain_config.rpc_url)
@@ -203,10 +234,14 @@ impl DatabaseAdapter for Postgres {
             .bind(&chain_config.native_symbol)
             .bind(chain_config.decimals as i16)
             .bind(chain_config.last_processed_block as i64)
+            .bind(chain_config.block_lag as i16)
+            .bind(chain_config.required_confirmations as i64)
             .execute(&self.pool)
             .await?;
 
-        self.chains_cache.write().unwrap().insert(chain_config.name.clone(), chain_config.clone());
+        let blockchain = Blockchain::new(chain_config.clone())?;
+
+        self.chains_cache.write().unwrap().insert(chain_config.name.clone(), Arc::new(blockchain));
 
         self._insert_token_decimals(&chain_config.name, &chain_config.native_symbol,
                                     chain_config.decimals)?;
@@ -221,25 +256,23 @@ impl DatabaseAdapter for Postgres {
             .execute(&self.pool)
             .await?;
 
-        if let Some(c) = self.chains_cache.write().unwrap().get_mut(chain_name) {
-            c.last_processed_block = block_num;
-        }
-
         Ok(())
     }
 
     async fn get_latest_block(&self, chain_name: &str) -> anyhow::Result<Option<u64>> {
         Ok(self.chains_cache.read().unwrap().get(chain_name)
-            .map(|c| c.last_processed_block))
+            .map(|c| c.config().read().unwrap().last_processed_block))
     }
 
-    async fn get_chains_with_token(&self, token_symbol: &str) -> anyhow::Result<Vec<ChainConfig>> {
+    async fn get_chains_with_token(&self, token_symbol: &str) -> anyhow::Result<Vec<Arc<Blockchain>>> {
         let guard = self.chains_cache.read().unwrap();
 
         let result = guard.values()
             .filter(|c| {
-                if c.native_symbol == token_symbol { return true; }
-                c.tokens.read().unwrap().iter()
+                if c.config().read().unwrap()
+                    .native_symbol == token_symbol { return true; }
+                c.config().read().unwrap()
+                    .tokens.read().unwrap().iter()
                     .any(|c| c.symbol == token_symbol)
             })
             .cloned()
@@ -282,41 +315,52 @@ impl DatabaseAdapter for Postgres {
         Ok(self.chains_cache.read().unwrap().contains_key(chain_name))
     }
 
-    async fn update_chain_partial(&self, chain_name: &str, update_chain_req: &PartialChainUpdate)
-        -> anyhow::Result<()>
+    async fn update_chain_partial(&self, chain_name: &str, chain_update: &PartialChainUpdate)
+                                  -> anyhow::Result<()>
     {
         sqlx::query(
             r#"UPDATE chains SET
                        rpc_url = COALESCE($1, rpc_url),
                        last_processed_block = COALESCE($2, last_processed_block),
-                       xpub = COALESCE($3, xpub)
-                   WHERE name = $4"#
+                       xpub = COALESCE($3, xpub),
+                       block_lag = COALESCE($4, block_lag),
+                       required_confirmations = COALESCE($5, required_confirmations)
+                   WHERE name = $6"#
         )
-            .bind(update_chain_req.rpc_url.to_owned())
-            .bind(update_chain_req.last_processed_block.map(|x| x as i64))
-            .bind(update_chain_req.xpub.to_owned())
+            .bind(chain_update.rpc_url.to_owned())
+            .bind(chain_update.last_processed_block.map(|x| x as i64))
+            .bind(chain_update.xpub.to_owned())
+            .bind(chain_update.block_lag.map(|x| x as i16))
+            .bind(chain_update.required_confirmations.map(|x| x as i16))
             .bind(chain_name)
             .execute(&self.pool)
             .await?;
 
-        let mut guard = self.chains_cache.write().unwrap();
-        let chain = guard.get_mut(chain_name)
+        let guard = self.chains_cache.write().unwrap();
+        let blockchain = guard.get(chain_name)
             .ok_or_else(|| anyhow::anyhow!("chain '{}' does not exist", chain_name))?;
 
-        if let Some(xpub) = &update_chain_req.xpub {
-            chain.xpub = xpub.to_owned();
+        let config_lock = blockchain.config();
+        let mut chain_config = config_lock.write().unwrap();
+
+        if let Some(xpub) = &chain_update.xpub {
+            chain_config.xpub = xpub.to_owned();
         }
 
-        if let Some(rpc_url) = &update_chain_req.rpc_url {
-            chain.rpc_url = rpc_url.to_owned();
+        if let Some(rpc_url) = &chain_update.rpc_url {
+            chain_config.rpc_url = rpc_url.to_owned();
         }
 
-        if let Some(last_processed_block) = update_chain_req.last_processed_block {
-            chain.last_processed_block = last_processed_block;
+        if let Some(last_processed_block) = chain_update.last_processed_block {
+            chain_config.last_processed_block = last_processed_block;
         }
 
-        if let Some(block_lag) = update_chain_req.block_lag {
-            chain.block_lag = block_lag;
+        if let Some(block_lag) = chain_update.block_lag {
+            chain_config.block_lag = block_lag;
+        }
+
+        if let Some(required_confirmations) = chain_update.required_confirmations {
+            chain_config.required_confirmations = required_confirmations;
         }
 
         Ok(())
@@ -324,7 +368,8 @@ impl DatabaseAdapter for Postgres {
 
     async fn get_watch_addresses(&self, chain_name: &str) -> anyhow::Result<Option<Vec<String>>> {
         Ok(self.chains_cache.read().unwrap().get(chain_name)
-            .map(|c| c.watch_addresses.read().unwrap().iter()
+            .map(|c| c.config().read().unwrap()
+                .watch_addresses.read().unwrap().iter()
                 .cloned()
                 .collect()))
     }
@@ -332,7 +377,8 @@ impl DatabaseAdapter for Postgres {
     async fn remove_watch_address(&self, chain_name: &str, address: &str) -> anyhow::Result<()> {
         match self.chains_cache.read().unwrap().get(chain_name) {
             Some(c) => {
-                c.watch_addresses.write().unwrap().remove(address);
+                c.config().read().unwrap()
+                    .watch_addresses.write().unwrap().remove(address);
             }
             None => anyhow::bail!("chain '{}' does not exist", chain_name),
         }
@@ -347,9 +393,12 @@ impl DatabaseAdapter for Postgres {
     ) -> anyhow::Result<()> {
         match self.chains_cache.read().unwrap().get(chain_name) {
             Some(c) => {
-                let mut guard = c.watch_addresses.write().unwrap();
+                let config_lock = c.config();
+                let guard = config_lock.read().unwrap();
+                let mut watch_addresses = guard.watch_addresses.write().unwrap();
+
                 for addr in addresses {
-                    guard.remove::<String>(addr);
+                    watch_addresses.remove::<String>(addr);
                 }
             }
             None => anyhow::bail!("chain '{}' does not exist", chain_name)
@@ -361,7 +410,8 @@ impl DatabaseAdapter for Postgres {
     async fn add_watch_address(&self, chain_name: &str, address: &str) -> anyhow::Result<()> {
         match self.chains_cache.read().unwrap().get(chain_name) {
             Some(c) => {
-                c.watch_addresses.write().unwrap().insert(address.to_owned());
+                c.config().read().unwrap()
+                    .watch_addresses.write().unwrap().insert(address.to_owned());
             }
             None => anyhow::bail!("chain '{}' does not exist", chain_name),
         }
@@ -371,29 +421,33 @@ impl DatabaseAdapter for Postgres {
 
     async fn get_xpub(&self, chain_name: &str) -> anyhow::Result<Option<String>> {
         Ok(self.chains_cache.read().unwrap().get(chain_name)
-            .map(|c| c.xpub.clone()))
+            .map(|c| c.config().read().unwrap().xpub.clone()))
     }
 
     async fn get_rpc_url(&self, chain_name: &str) -> anyhow::Result<Option<String>> {
         Ok(self.chains_cache.read().unwrap().get(chain_name)
-            .map(|c| c.rpc_url.clone()))
+            .map(|c| c.config().read().unwrap()
+                .rpc_url.clone()))
     }
 
     async fn get_block_lag(&self, chain_name: &str) -> anyhow::Result<Option<u8>> {
         Ok(self.chains_cache.read().unwrap().get(chain_name)
-            .map(|c| c.block_lag))
+            .map(|c| c.config().read().unwrap()
+                .block_lag))
     }
 
     async fn get_tokens(&self, chain_name: &str) -> anyhow::Result<Option<Vec<TokenConfig>>> {
         Ok(self.chains_cache.read().unwrap().get(chain_name)
-            .map(|c| c.tokens.read().unwrap().iter()
+            .map(|c| c.config().read().unwrap()
+                .tokens.read().unwrap().iter()
                 .cloned()
                 .collect()))
     }
 
     async fn get_token_contracts(&self, chain_name: &str) -> anyhow::Result<Option<Vec<String>>> {
         Ok(self.chains_cache.read().unwrap().get(chain_name)
-            .map(|c| c.tokens.read().unwrap().iter()
+            .map(|c| c.config().read().unwrap()
+                .tokens.read().unwrap().iter()
                 .map(|tc| tc.contract.clone())
                 .collect()))
     }
@@ -402,7 +456,8 @@ impl DatabaseAdapter for Postgres {
         -> anyhow::Result<Option<TokenConfig>>
     {
         match self.chains_cache.read().unwrap().get(chain_name) {
-            Some(c) => Ok(c.tokens.read().unwrap().iter()
+            Some(c) => Ok(c.config().read().unwrap()
+                .tokens.read().unwrap().iter()
                 .find(|tc| tc.symbol == token_symbol)
                 .cloned()),
             None => Ok(None),
@@ -435,7 +490,8 @@ impl DatabaseAdapter for Postgres {
         -> anyhow::Result<Option<TokenConfig>>
     {
         match self.chains_cache.read().unwrap().get(chain_name) {
-            Some(c) => Ok(c.tokens.read().unwrap().iter()
+            Some(c) => Ok(c.config().read().unwrap()
+                .tokens.read().unwrap().iter()
                 .find(|tc| tc.contract == contract_address)
                 .cloned()),
             None => Ok(None),
@@ -453,7 +509,8 @@ impl DatabaseAdapter for Postgres {
             .await?;
 
         if let Some(c) = self.chains_cache.read().unwrap().get(chain_name) {
-            c.tokens.write().unwrap().retain(|t| t.symbol != token_symbol);
+            c.config().read().unwrap()
+                .tokens.write().unwrap().retain(|t| t.symbol != token_symbol);
         }
 
         if let Some(chain_decimals) = self.token_decimals.write().unwrap()
@@ -475,7 +532,8 @@ impl DatabaseAdapter for Postgres {
 
         if let Some(symbol) = symbol_opt {
             if let Some(c) = self.chains_cache.read().unwrap().get(chain_name) {
-                c.tokens.write().unwrap().retain(|t| t.symbol != symbol);
+                c.config().read().unwrap()
+                    .tokens.write().unwrap().retain(|t| t.symbol != symbol);
             }
 
             if let Some(chain_decimals) = self.token_decimals.write().unwrap()
@@ -507,7 +565,8 @@ impl DatabaseAdapter for Postgres {
             .await?;
 
         if let Some(c) = self.chains_cache.read().unwrap().get(chain_name) {
-            c.tokens.write().unwrap().insert(token_config.clone());
+            c.config().read().unwrap()
+                .tokens.write().unwrap().insert(token_config.clone());
         }
         self._insert_token_decimals(chain_name, &token_config.symbol, token_config.decimals)?;
 
@@ -693,34 +752,34 @@ impl DatabaseAdapter for Postgres {
         Ok(())
     }
 
-    async fn add_payment(&self, uuid: &str, amount_raw: U256) -> anyhow::Result<(U256, String)> {
-        let uuid_parsed = uuid::Uuid::parse_str(&uuid)?;
-        let added_amount_bd = BigDecimal::from_str(&amount_raw.to_string())?;
-
-        let row = sqlx::query(
-            r#"UPDATE invoices
-                   SET paid_raw = paid_raw + $1
-                   WHERE id = $2
-                   RETURNING paid_raw::TEXT, decimals"#
-        )
-            .bind(added_amount_bd)
-            .bind(uuid_parsed)
-            .fetch_optional(&self.pool)
-            .await?;
-
-        let row = row.ok_or_else(|| anyhow::anyhow!("Invoice {} not found", uuid))?;
-
-        let new_paid_u256 = {
-            let np_bd: String = row.get("paid_raw");
-            U256::from_str(&np_bd)
-                .context("Failed to parse result paid_raw")?
-        };
-        let decimals = row.get::<i16, _>("decimals") as u8;
-
-        let paid_human = format_units(new_paid_u256, decimals)?;
-
-        Ok((new_paid_u256, paid_human))
-    }
+    // async fn add_payment(&self, uuid: &str, amount_raw: U256) -> anyhow::Result<(U256, String)> {
+    //     let uuid_parsed = uuid::Uuid::parse_str(&uuid)?;
+    //     let added_amount_bd = BigDecimal::from_str(&amount_raw.to_string())?;
+    //
+    //     let row = sqlx::query(
+    //         r#"UPDATE invoices
+    //                SET paid_raw = paid_raw + $1
+    //                WHERE id = $2
+    //                RETURNING paid_raw::TEXT, decimals"#
+    //     )
+    //         .bind(added_amount_bd)
+    //         .bind(uuid_parsed)
+    //         .fetch_optional(&self.pool)
+    //         .await?;
+    //
+    //     let row = row.ok_or_else(|| anyhow::anyhow!("Invoice {} not found", uuid))?;
+    //
+    //     let new_paid_u256 = {
+    //         let np_bd: String = row.get("paid_raw");
+    //         U256::from_str(&np_bd)
+    //             .context("Failed to parse result paid_raw")?
+    //     };
+    //     let decimals = row.get::<i16, _>("decimals") as u8;
+    //
+    //     let paid_human = format_units(new_paid_u256, decimals)?;
+    //
+    //     Ok((new_paid_u256, paid_human))
+    // }
 
     async fn get_pending_invoice_by_address(&self, chain_name: &str, address: &str)
         -> anyhow::Result<Option<Invoice>>
@@ -814,12 +873,107 @@ impl DatabaseAdapter for Postgres {
         Ok(())
     }
 
+    async fn add_payment_attempt(&self, invoice_id: &str, from: &str, to: &str, tx_hash: &str,
+                                 amount_raw: U256, block_number: u64, network: &str) -> anyhow::Result<()> {
+        let invoice_uuid_parsed = uuid::Uuid::parse_str(invoice_id)?;
+        let amount_bd = BigDecimal::from_str(&amount_raw.to_string())?;
+
+        sqlx::query(
+            r#"INSERT INTO payments (invoice_id, from, to, network, tx_hash, amount_raw,
+                      block_number, status)
+                   VALUES ($1, $2, $3, $4, $5, $6, $7, 'Confirming')
+                   ON CONFLICT (invoice_id, tx_hash)
+                   DO UPDATE SET block_number = excluded.block_number"#
+        )
+            .bind(invoice_uuid_parsed)
+            .bind(from)
+            .bind(to)
+            .bind(network)
+            .bind(tx_hash)
+            .bind(amount_bd)
+            .bind(block_number as i64)
+            .execute(&self.pool)
+            .await?;
+
+        Ok(())
+    }
+
+    async fn get_confirming_payments(&self) -> anyhow::Result<Vec<Payment>> {
+        let rows = sqlx::query("SELECT * FROM payments WHERE status = 'Confirming'")
+            .fetch_all(&self.pool)
+            .await?;
+
+        rows.into_iter().map(Self::map_row_to_payment).collect()
+    }
+
+    async fn finalize_payment(&self, payment_id: &str) -> anyhow::Result<bool> {
+        let pay_uuid_parsed = uuid::Uuid::parse_str(&payment_id)?;
+
+        let mut tx = self.pool.begin().await?;
+
+        let row = sqlx::query(
+            "UPDATE payments SET status = 'Confirmed' WHERE id = $1
+                                         RETURNING invoice_id, amount_raw::TEXT"
+        )
+            .bind(pay_uuid_parsed)
+            .fetch_one(&mut *tx)
+            .await?;
+
+        let inv_id: uuid::Uuid = row.get("invoice_id");
+
+        let pay_amount_str: String = row.get("amount_raw");
+        let pay_amount_bd = BigDecimal::from_str(&pay_amount_str)?;
+
+        let inv = sqlx::query(
+            r#"UPDATE invoices SET paid_raw = paid_raw + $1 WHERE id = $2
+                   RETURNING paid_raw::TEXT, amount_raw::TEXT"#
+        )
+            .bind(pay_amount_bd)
+            .bind(inv_id)
+            .fetch_one(&mut *tx)
+            .await?;
+
+        let inv_paid_str: String = inv.get("paid_raw");
+        let inv_amount_str: String = inv.get("amount_raw");
+
+        let inv_paid_raw = U256::from_str(&inv_paid_str)
+            .map_err(|e| anyhow::anyhow!("Failed to parse paid_raw: {}", e))?;
+        let inv_amount_raw = U256::from_str(&inv_amount_str)
+            .map_err(|e| anyhow::anyhow!("Failed to parse amount_raw: {}", e))?;
+
+        let is_fully_paid = inv_paid_raw >= inv_amount_raw;
+        if is_fully_paid {
+            sqlx::query("UPDATE invoices SET status = 'Paid' WHERE id = $1")
+                .bind(inv_id)
+                .execute(&mut *tx)
+                .await?;
+        }
+
+        tx.commit().await?;
+
+        Ok(is_fully_paid)
+    }
+
+    async fn update_payment_block(&self, payment_id: &str, block_num: u64) -> anyhow::Result<()> {
+        let uuid_parsed = uuid::Uuid::parse_str(payment_id)?;
+
+        sqlx::query("UPDATE payments SET block_number = $1 WHERE id = $2")
+            .bind(block_num as i64)
+            .bind(uuid_parsed)
+            .execute(&self.pool)
+            .await?;
+
+        Ok(())
+    }
+
     async fn get_token_decimals(&self, chain_name: &str, token_symbol: &str) -> anyhow::Result<Option<u8>> {
         if let Some(d) = self._get_token_decimals_cached(chain_name, token_symbol) {
             return Ok(Some(d));
         }
 
-        if let Some(c) = self.chains_cache.read().unwrap().get(chain_name) {
+        if let Some(bc) = self.chains_cache.read().unwrap().get(chain_name) {
+            let lock = bc.config();
+            let c = lock.read().unwrap();
             if c.native_symbol == token_symbol {
                 self._insert_token_decimals(chain_name, token_symbol, c.decimals)?;
                 return Ok(Some(c.decimals));

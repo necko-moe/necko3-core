@@ -1,29 +1,30 @@
-use crate::config::{ChainConfig, TokenConfig};
 use crate::db::mock::MockDatabase;
 use crate::db::postgres::Postgres;
-use crate::model::{Invoice, InvoiceStatus, PartialChainUpdate};
+use crate::model::{ChainConfig, TokenConfig, Invoice, InvoiceStatus, PartialChainUpdate, Payment};
 use alloy::primitives::U256;
 use std::collections::HashMap;
 use std::future::Future;
+use std::sync::Arc;
 use sqlx::postgres::PgPoolOptions;
+use crate::chain::Blockchain;
 
 pub mod postgres;
 pub mod mock;
 
 pub trait DatabaseAdapter: Send + Sync {
     // chain
-    fn get_chains_map(&self) -> impl Future<Output = anyhow::Result<HashMap<String, ChainConfig>>> + Send;
-    fn get_chains(&self) -> impl Future<Output = anyhow::Result<Vec<ChainConfig>>> + Send;
-    fn get_chain(&self, chain_name: &str) -> impl Future<Output = anyhow::Result<Option<ChainConfig>>> + Send;
-    fn get_chain_by_id(&self, id: u32) -> impl Future<Output = anyhow::Result<Option<ChainConfig>>> + Send;
+    fn get_chains_map(&self) -> impl Future<Output = anyhow::Result<HashMap<String, Arc<Blockchain>>>> + Send;
+    fn get_chains(&self) -> impl Future<Output = anyhow::Result<Vec<Arc<Blockchain>>>> + Send;
+    fn get_chain(&self, chain_name: &str) -> impl Future<Output = anyhow::Result<Option<Arc<Blockchain>>>> + Send;
+    fn get_chain_by_id(&self, id: u32) -> impl Future<Output = anyhow::Result<Option<Arc<Blockchain>>>> + Send;
     fn add_chain(&self, chain_config: &ChainConfig) -> impl Future<Output = anyhow::Result<()>> + Send;
     fn update_chain_block(&self, chain_name: &str, block_num: u64) -> impl Future<Output = anyhow::Result<()>> + Send;
     fn get_latest_block(&self, chain_name: &str) -> impl Future<Output = anyhow::Result<Option<u64>>> + Send;
-    fn get_chains_with_token(&self, token_symbol: &str) -> impl Future<Output = anyhow::Result<Vec<ChainConfig>>> + Send;
+    fn get_chains_with_token(&self, token_symbol: &str) -> impl Future<Output = anyhow::Result<Vec<Arc<Blockchain>>>> + Send;
     fn remove_chain(&self, chain_name: &str) -> impl Future<Output = anyhow::Result<()>> + Send;
     fn remove_chain_by_id(&self, id: u32) -> impl Future<Output = anyhow::Result<()>> + Send;
     fn chain_exists(&self, chain_name: &str) -> impl Future<Output = anyhow::Result<bool>> + Send;
-    fn update_chain_partial(&self, chain_name: &str, update_chain_req: &PartialChainUpdate)
+    fn update_chain_partial(&self, chain_name: &str, chain_update: &PartialChainUpdate)
         -> impl Future<Output = anyhow::Result<()>> + Send;
 
     fn get_watch_addresses(&self, chain_name: &str) -> impl Future<Output = anyhow::Result<Option<Vec<String>>>> + Send;
@@ -63,7 +64,7 @@ pub trait DatabaseAdapter: Send + Sync {
     fn get_busy_indexes(&self, chain_name: &str) -> impl Future<Output = anyhow::Result<Vec<u32>>> + Send;
     fn add_invoice(&self, invoice: &Invoice) -> impl Future<Output = anyhow::Result<()>> + Send;
     fn set_invoice_status(&self, uuid: &str, status: InvoiceStatus) -> impl Future<Output = anyhow::Result<()>> + Send;
-    fn add_payment(&self, uuid: &str, amount_raw: U256) -> impl Future<Output = anyhow::Result<(U256, String)>> + Send; // (paid_raw, paid_human)
+    // fn add_payment(&self, uuid: &str, amount_raw: U256) -> impl Future<Output = anyhow::Result<(U256, String)>> + Send; // (paid_raw, paid_human)
     fn get_pending_invoice_by_address(&self, chain_name: &str, address: &str)
         -> impl Future<Output = anyhow::Result<Option<Invoice>>> + Send;
     fn expire_old_invoices(&self)
@@ -72,6 +73,13 @@ pub trait DatabaseAdapter: Send + Sync {
     fn is_invoice_paid(&self, uuid: &str) -> impl Future<Output = anyhow::Result<Option<bool>>> + Send;
     fn is_invoice_pending(&self, uuid: &str) -> impl Future<Output = anyhow::Result<Option<bool>>> + Send;
     fn remove_invoice(&self, uuid: &str) -> impl Future<Output = anyhow::Result<()>> + Send;
+
+    // payments
+    fn add_payment_attempt(&self, invoice_id: &str, from: &str, to: &str, tx_hash: &str, amount_raw: U256,
+                           block_number: u64, network: &str) -> impl Future<Output = anyhow::Result<()>> + Send;
+    fn get_confirming_payments(&self) -> impl Future<Output = anyhow::Result<Vec<Payment>>> + Send;
+    fn finalize_payment(&self, payment_id: &str) -> impl Future<Output = anyhow::Result<bool>> + Send;
+    fn update_payment_block(&self, payment_id: &str, block_num: u64) -> impl Future<Output = anyhow::Result<()>> + Send;
     
     // other
     fn get_token_decimals(&self, chain_name: &str, token_symbol: &str) -> impl Future<Output = anyhow::Result<Option<u8>>> + Send;
@@ -108,28 +116,29 @@ impl Database {
 }
 
 impl DatabaseAdapter for Database {
-    async fn get_chains_map(&self) -> anyhow::Result<HashMap<String, ChainConfig>> {
+
+    async fn get_chains_map(&self) -> anyhow::Result<HashMap<String, Arc<Blockchain>>> {
         match self {
             Database::Mock(db) => db.get_chains_map().await,
             Database::Postgres(db) => db.get_chains_map().await,
         }
     }
 
-    async fn get_chains(&self) -> anyhow::Result<Vec<ChainConfig>> {
+    async fn get_chains(&self) -> anyhow::Result<Vec<Arc<Blockchain>>> {
         match self {
             Database::Mock(db) => db.get_chains().await,
             Database::Postgres(db) => db.get_chains().await,
         }
     }
 
-    async fn get_chain(&self, chain_name: &str) -> anyhow::Result<Option<ChainConfig>> {
+    async fn get_chain(&self, chain_name: &str) -> anyhow::Result<Option<Arc<Blockchain>>> {
         match self {
             Database::Mock(db) => db.get_chain(chain_name).await,
             Database::Postgres(db) => db.get_chain(chain_name).await,
         }
     }
 
-    async fn get_chain_by_id(&self, id: u32) -> anyhow::Result<Option<ChainConfig>> {
+    async fn get_chain_by_id(&self, id: u32) -> anyhow::Result<Option<Arc<Blockchain>>> {
         match self {
             Database::Mock(db) => db.get_chain_by_id(id).await,
             Database::Postgres(db) => db.get_chain_by_id(id).await,
@@ -157,7 +166,7 @@ impl DatabaseAdapter for Database {
         }
     }
 
-    async fn get_chains_with_token(&self, token_symbol: &str) -> anyhow::Result<Vec<ChainConfig>> {
+    async fn get_chains_with_token(&self, token_symbol: &str) -> anyhow::Result<Vec<Arc<Blockchain>>> {
         match self {
             Database::Mock(db) => db.get_chains_with_token(token_symbol).await,
             Database::Postgres(db) => db.get_chains_with_token(token_symbol).await,
@@ -185,10 +194,10 @@ impl DatabaseAdapter for Database {
         }
     }
 
-    async fn update_chain_partial(&self, chain_name: &str, update_chain_req: &PartialChainUpdate) -> anyhow::Result<()> {
+    async fn update_chain_partial(&self, chain_name: &str, chain_update: &PartialChainUpdate) -> anyhow::Result<()> {
         match self {
-            Database::Mock(db) => db.update_chain_partial(chain_name, update_chain_req).await,
-            Database::Postgres(db) => db.update_chain_partial(chain_name, update_chain_req).await,
+            Database::Mock(db) => db.update_chain_partial(chain_name, chain_update).await,
+            Database::Postgres(db) => db.update_chain_partial(chain_name, chain_update).await,
         }
     }
 
@@ -374,12 +383,12 @@ impl DatabaseAdapter for Database {
         }
     }
 
-    async fn add_payment(&self, uuid: &str, amount_raw: U256) -> anyhow::Result<(U256, String)> {
-        match self {
-            Database::Mock(db) => db.add_payment(uuid, amount_raw).await,
-            Database::Postgres(db) => db.add_payment(uuid, amount_raw).await,
-        }
-    }
+    // async fn add_payment(&self, uuid: &str, amount_raw: U256) -> anyhow::Result<(U256, String)> {
+    //     match self {
+    //         Database::Mock(db) => db.add_payment(uuid, amount_raw).await,
+    //         Database::Postgres(db) => db.add_payment(uuid, amount_raw).await,
+    //     }
+    // }
 
     async fn get_pending_invoice_by_address(&self, chain_name: &str, address: &str) -> anyhow::Result<Option<Invoice>> {
         match self {
@@ -420,6 +429,37 @@ impl DatabaseAdapter for Database {
         match self {
             Database::Mock(db) => db.remove_invoice(uuid).await,
             Database::Postgres(db) => db.remove_invoice(uuid).await,
+        }
+    }
+
+    async fn add_payment_attempt(&self, invoice_id: &str, from: &str, to: &str, tx_hash: &str,
+                                 amount_raw: U256, block_number: u64, network: &str) -> anyhow::Result<()> {
+        match self {
+            Database::Mock(db) => db.add_payment_attempt(invoice_id, from, to, tx_hash,
+                                                         amount_raw, block_number, network).await,
+            Database::Postgres(db) => db.add_payment_attempt(invoice_id, from, to, tx_hash,
+                                                             amount_raw, block_number, network).await,
+        }
+    }
+
+    async fn get_confirming_payments(&self) -> anyhow::Result<Vec<Payment>> {
+        match self {
+            Database::Mock(db) => db.get_confirming_payments().await,
+            Database::Postgres(db) => db.get_confirming_payments().await,
+        }
+    }
+
+    async fn finalize_payment(&self, payment_id: &str) -> anyhow::Result<bool> {
+        match self {
+            Database::Mock(db) => db.finalize_payment(payment_id).await,
+            Database::Postgres(db) => db.finalize_payment(payment_id).await,
+        }
+    }
+
+    async fn update_payment_block(&self, payment_id: &str, block_num: u64) -> anyhow::Result<()> {
+        match self {
+            Database::Mock(db) => db.update_payment_block(payment_id, block_num).await,
+            Database::Postgres(db) => db.update_payment_block(payment_id, block_num).await,
         }
     }
 
