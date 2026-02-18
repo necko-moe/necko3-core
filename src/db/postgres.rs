@@ -1009,11 +1009,12 @@ impl DatabaseAdapter for Postgres {
     }
 
     async fn set_webhook_status(&self, id: &str, status: WebhookStatus) -> anyhow::Result<()> {
+        let uuid_parsed = uuid::Uuid::parse_str(id)?;
         sqlx::query(
             "UPDATE webhooks SET status = $1 WHERE id = $2"
         )
             .bind(status.to_string())
-            .bind(id)
+            .bind(uuid_parsed)
             .execute(&self.pool)
             .await?;
 
@@ -1021,13 +1022,15 @@ impl DatabaseAdapter for Postgres {
     }
 
     async fn schedule_webhook_retry(&self, id: &str, attempts: i32, next_retry_in_secs: f64) -> anyhow::Result<()> {
+        let uuid_parsed = uuid::Uuid::parse_str(id)?;
+
         sqlx::query(
             r#"UPDATE webhooks SET status = 'Pending', attempts = $1,
                        next_retry = NOW() + (interval '1 second' * $2) WHERE id = $3"#
         )
             .bind(attempts)
             .bind(next_retry_in_secs)
-            .bind(id)
+            .bind(uuid_parsed)
             .execute(&self.pool)
             .await?;
 
