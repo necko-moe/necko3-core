@@ -982,12 +982,12 @@ impl DatabaseAdapter for Postgres {
     async fn select_webhooks_job(&self) -> anyhow::Result<Vec<WebhookJob>> {
         let jobs: Vec<WebhookJob> = sqlx::query_as(
             r#"UPDATE webhooks w
-                       SET status = 'processing'
+                       SET status = 'Processing'
                        FROM invoices i
                        WHERE w.invoice_id = i.id
                            AND w.id IN (
                                SELECT id FROM webhooks
-                               WHERE status = 'pending' AND next_retry <= NOW()
+                               WHERE status = 'Pending' AND next_retry <= NOW()
                                LIMIT 50
                                FOR UPDATE SKIP LOCKED
                            )
