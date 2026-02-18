@@ -909,7 +909,10 @@ impl DatabaseAdapter for Postgres {
     }
 
     async fn get_confirming_payments(&self) -> anyhow::Result<Vec<Payment>> {
-        let rows = sqlx::query("SELECT * FROM payments WHERE status = 'Confirming'")
+        let rows = sqlx::query(
+            r#"SELECT id, invoice_id, "from", "to", network, tx_hash,
+                       amount_raw::TEXT, block_number, status, created_at
+                   FROM payments WHERE status = 'Confirming'"#)
             .fetch_all(&self.pool)
             .await?;
 
