@@ -980,7 +980,9 @@ impl DatabaseAdapter for Postgres {
     }
 
     async fn select_webhooks_job(&self) -> anyhow::Result<Vec<WebhookJob>> {
-        let jobs: Vec<WebhookJob> = sqlx::query_as(
+        let mut tx = self.pool.begin().await?;
+
+        let res = sqlx::query_as::<_, WebhookJob>(
             r#"UPDATE webhooks w
                        SET status = 'Processing'
                        FROM invoices i
@@ -991,13 +993,19 @@ impl DatabaseAdapter for Postgres {
                                LIMIT 50
                                FOR UPDATE SKIP LOCKED
                            )
-                       RETURNING w.id, w.url, w.payload, w.max_retries, w.attempts, i.webhook_secret as "secret_key!"
-                           "#
+                       RETURNING w.id, w.url, w.payload, w.max_retries, w.attempts,
+                           COALESCE(i.webhook_secret, 'default_secret') as secret_key"#
         )
-            .fetch_all(&self.pool)
-            .await?;
+            .fetch_all(&mut *tx)
+            .await;
 
-        Ok(jobs)
+        match res {
+            Ok(jobs) => {
+                tx.commit().await?;
+                Ok(jobs)
+            },
+            Err(e) => Err(e.into())
+        }
     }
 
     async fn set_webhook_status(&self, id: &str, status: WebhookStatus) -> anyhow::Result<()> {

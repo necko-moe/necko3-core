@@ -15,7 +15,14 @@ pub fn start_webhook_dispatcher(state: Arc<AppState>) -> JoinHandle<()> {
 
         loop {
             let jobs_result: anyhow::Result<Vec<WebhookJob>> = state.db.select_webhooks_job().await;
-            let jobs = jobs_result.unwrap_or_default();
+            let jobs = match jobs_result {
+                Ok(j) => j,
+                Err(e) => {
+                    eprintln!("Failed to select webhooks job: {}... Retrying in 5 seconds", e);
+                    tokio::time::sleep(Duration::from_secs(5)).await;
+                    continue
+                }
+            };
 
             if jobs.is_empty() {
                 tokio::time::sleep(Duration::from_millis(500)).await;
@@ -23,7 +30,14 @@ pub fn start_webhook_dispatcher(state: Arc<AppState>) -> JoinHandle<()> {
             }
 
             for job in jobs {
-                tokio::spawn(process_webhook(state.db.clone(), client.clone(), job));
+                let client_clone = client.clone();
+                let db_clone = state.db.clone();
+
+                tokio::spawn(async move {
+                    if let Err(e) = process_webhook(db_clone, client_clone, job).await {
+                        eprintln!("Failed to process webhook: {:?}", e);
+                    }
+                });
             }
         }
     })
@@ -82,4 +96,63 @@ pub async fn process_webhook(
     }
 
     Ok(())
+}
+
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::db::mock::MockDatabase;
+    use crate::model::{Invoice, InvoiceStatus, WebhookEvent};
+    use wiremock::matchers::{header, header_exists, method};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    #[tokio::test]
+    async fn test_webhook_delivery_with_signature() {
+        let mock_server = MockServer::start().await;
+        let secret = "test_secret";
+
+        Mock::given(method("POST"))
+            .and(header("Content-Type", "application/json"))
+            .and(header_exists("X-Webhook-Signature"))
+            .respond_with(ResponseTemplate::new(200))
+            .mount(&mock_server)
+            .await;
+
+        let client = Arc::new(Client::new());
+        let invoice_uid = uuid::Uuid::new_v4().to_string();
+
+        let event = WebhookEvent::InvoicePaid {
+            invoice_id: invoice_uid.clone(),
+            paid_amount: "100.0".to_string(),
+        };
+
+        let db = Arc::new(Database::Mock(MockDatabase::new()));
+        db.add_invoice(&Invoice {
+            id: invoice_uid.clone(),
+            address_index: 0,
+            address: "".to_string(),
+            amount: "".to_string(),
+            amount_raw: Default::default(),
+            paid: "".to_string(),
+            paid_raw: Default::default(),
+            token: "".to_string(),
+            network: "".to_string(),
+            decimals: 0,
+            webhook_url: Some(mock_server.uri()),
+            webhook_secret: Some(secret.to_string()),
+            created_at: Default::default(),
+            expires_at: Default::default(),
+            status: InvoiceStatus::Pending,
+        }).await.unwrap();
+
+        db.add_webhook_job(&invoice_uid.clone(), &event).await.unwrap();
+
+        let mut jobs = db.select_webhooks_job().await.unwrap();
+        assert!(!jobs.is_empty(), "Job was not created in DB");
+
+        let job = jobs.remove(0);
+
+        process_webhook(db, client, job).await.unwrap();
+    }
 }
