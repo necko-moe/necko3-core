@@ -889,7 +889,7 @@ impl DatabaseAdapter for Postgres {
         let amount_bd = BigDecimal::from_str(&amount_raw.to_string())?;
 
         sqlx::query(
-            r#"INSERT INTO payments (invoice_id, from, to, network, tx_hash, amount_raw,
+            r#"INSERT INTO payments (invoice_id, "from", "to", network, tx_hash, amount_raw,
                       block_number, status)
                    VALUES ($1, $2, $3, $4, $5, $6, $7, 'Confirming')
                    ON CONFLICT (invoice_id, tx_hash)
