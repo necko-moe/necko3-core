@@ -22,7 +22,7 @@ pub fn start_janitor(state: Arc<AppState>, interval: Duration) -> JoinHandle<()>
 
             let mut to_remove: HashMap<String, Vec<String>> = HashMap::new();
 
-            for (address, network, invoice_id) in expired_addresses {
+            for (invoice_id, network, address) in expired_addresses {
                 println!("marking invoice {} (address {}) as expired", invoice_id, address);
 
                 if let Err(e) = state.db.add_webhook_job(&invoice_id, &WebhookEvent::InvoiceExpired {
