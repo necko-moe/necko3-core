@@ -1,5 +1,5 @@
 use crate::db::DatabaseAdapter;
-use crate::model::PaymentEvent;
+use crate::model::{PaymentEvent, WebhookEvent};
 use crate::AppState;
 use std::sync::Arc;
 use tokio::sync::mpsc::Receiver;
@@ -19,13 +19,6 @@ pub fn start_invoice_watcher(state: Arc<AppState>, mut rx: Receiver<PaymentEvent
                 continue;
             }
 
-            let now = chrono::Utc::now();
-            if invoice.expires_at < now {
-                println!("detected transaction on EXPIRED invoice. skipping \
-                        (you lost your tokens idiot)");
-                continue
-            }
-
             match state.db.add_payment_attempt(
                 &invoice.id,
                 &event.from,
@@ -36,6 +29,15 @@ pub fn start_invoice_watcher(state: Arc<AppState>, mut rx: Receiver<PaymentEvent
                 &event.network
             ).await {
                 Ok(_) => {
+                    if let Err(e) = state.db.add_webhook_job(&invoice.id, &WebhookEvent::TxDetected {
+                        invoice_id: invoice.id.clone(),
+                        tx_hash: event.tx_hash.to_string(),
+                        amount: event.amount.clone(),
+                        currency: event.token.clone(),
+                    }).await {
+                        eprintln!("Error adding webhook job (TxDetected) for {}: {}", invoice.id, e);
+                    }
+
                     println!(
                         "payment detected: {} {} for invoice {}. waiting for confirmations...",
                         event.amount,

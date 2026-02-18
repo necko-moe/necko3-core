@@ -3,6 +3,7 @@ use std::sync::{Arc, RwLock};
 use chrono::{DateTime, Utc};
 use alloy::primitives::{TxHash, U256};
 use serde::{Deserialize, Serialize};
+use sqlx::types::Json;
 use strum::{AsRefStr, Display, EnumString};
 use utoipa::ToSchema;
 
@@ -100,6 +101,8 @@ pub struct Invoice {
     pub token: String,
     pub network: String,
     pub decimals: u8,
+    pub webhook_url: Option<String>,
+    pub webhook_secret: Option<String>,
     pub created_at: DateTime<Utc>,
     pub expires_at: DateTime<Utc>,
     pub status: InvoiceStatus,
@@ -112,4 +115,48 @@ pub struct PartialChainUpdate {
     pub xpub: Option<String>,
     pub block_lag: Option<u8>,
     pub required_confirmations: Option<u64>,
+}
+
+#[derive(Debug, sqlx::FromRow)]
+pub struct WebhookJob {
+    pub id: uuid::Uuid,
+    pub url: String,
+    pub secret_key: String,
+    pub payload: Json<WebhookEvent>,
+    pub attempts: i32,
+    pub max_retries: i32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, ToSchema,
+    Display, EnumString, AsRefStr)]
+#[serde(tag = "event_type", content = "data", rename_all = "snake_case")]
+pub enum WebhookEvent {
+    TxDetected {
+        invoice_id: String,
+        tx_hash: String,
+        amount: String,
+        currency: String,
+    },
+    TxConfirmed {
+        invoice_id: String,
+        tx_hash: String,
+        confirmations: u64,
+    },
+    InvoicePaid {
+        invoice_id: String,
+        paid_amount: String,
+    },
+    InvoiceExpired {
+        invoice_id: String,
+    },
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, ToSchema,
+    Display, EnumString, AsRefStr)]
+#[strum(serialize_all = "PascalCase")]
+pub enum WebhookStatus {
+    Pending,
+    Processing,
+    Sent,
+    Failed
 }

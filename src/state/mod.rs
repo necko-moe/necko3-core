@@ -1,6 +1,7 @@
 pub mod watcher;
 pub mod janitor;
 pub mod confirmator;
+mod webhook;
 
 use crate::chain::BlockchainAdapter;
 use crate::db::{Database, DatabaseAdapter};
@@ -46,6 +47,7 @@ impl AppState {
         watcher::start_invoice_watcher(state_arc.clone(), rx);
         janitor::start_janitor(state_arc.clone(), janitor_timeout);
         confirmator::start_confirmator(state_arc.clone(), confirmator_timeout);
+        webhook::start_webhook_dispatcher(state_arc.clone());
         state_arc.clone().listen_all().await?;
 
         Ok(state_arc)

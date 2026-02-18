@@ -4,6 +4,7 @@ use std::time::Duration;
 use tokio::task::JoinHandle;
 use crate::AppState;
 use crate::db::DatabaseAdapter;
+use crate::model::WebhookEvent;
 
 pub fn start_janitor(state: Arc<AppState>, interval: Duration) -> JoinHandle<()> {
     tokio::spawn(async move {
@@ -19,11 +20,16 @@ pub fn start_janitor(state: Arc<AppState>, interval: Duration) -> JoinHandle<()>
                     vec![]
                 });
 
-
             let mut to_remove: HashMap<String, Vec<String>> = HashMap::new();
 
             for (address, network, invoice_id) in expired_addresses {
                 println!("marking invoice {} (address {}) as expired", invoice_id, address);
+
+                if let Err(e) = state.db.add_webhook_job(&invoice_id, &WebhookEvent::InvoiceExpired {
+                    invoice_id: invoice_id.clone(),
+                }).await {
+                    eprintln!("Error adding webhook job (InvoiceExpired) for {}: {}", invoice_id, e);
+                }
 
                 to_remove.entry(network)
                     .or_insert_with(Vec::new)

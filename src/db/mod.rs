@@ -1,6 +1,6 @@
 use crate::db::mock::MockDatabase;
 use crate::db::postgres::Postgres;
-use crate::model::{ChainConfig, TokenConfig, Invoice, InvoiceStatus, PartialChainUpdate, Payment};
+use crate::model::{ChainConfig, TokenConfig, Invoice, InvoiceStatus, PartialChainUpdate, Payment, WebhookEvent, WebhookJob, WebhookStatus};
 use alloy::primitives::U256;
 use std::collections::HashMap;
 use std::future::Future;
@@ -80,7 +80,13 @@ pub trait DatabaseAdapter: Send + Sync {
     fn get_confirming_payments(&self) -> impl Future<Output = anyhow::Result<Vec<Payment>>> + Send;
     fn finalize_payment(&self, payment_id: &str) -> impl Future<Output = anyhow::Result<bool>> + Send;
     fn update_payment_block(&self, payment_id: &str, block_num: u64) -> impl Future<Output = anyhow::Result<()>> + Send;
-    
+
+    // webhooks
+    fn select_webhooks_job(&self) -> impl Future<Output = anyhow::Result<Vec<WebhookJob>>> + Send;
+    fn set_webhook_status(&self, id: &str, status: WebhookStatus) -> impl Future<Output = anyhow::Result<()>> + Send;
+    fn schedule_webhook_retry(&self, id: &str, attempts: i32, next_retry_in_secs: f64) -> impl Future<Output = anyhow::Result<()>> + Send;
+    fn add_webhook_job(&self, invoice_id: &str, event: &WebhookEvent) -> impl Future<Output = anyhow::Result<()>> + Send;
+
     // other
     fn get_token_decimals(&self, chain_name: &str, token_symbol: &str) -> impl Future<Output = anyhow::Result<Option<u8>>> + Send;
 }
@@ -460,6 +466,34 @@ impl DatabaseAdapter for Database {
         match self {
             Database::Mock(db) => db.update_payment_block(payment_id, block_num).await,
             Database::Postgres(db) => db.update_payment_block(payment_id, block_num).await,
+        }
+    }
+
+    async fn select_webhooks_job(&self) -> anyhow::Result<Vec<WebhookJob>> {
+        match self {
+            Database::Mock(db) => db.select_webhooks_job().await,
+            Database::Postgres(db) => db.select_webhooks_job().await,
+        }
+    }
+
+    async fn set_webhook_status(&self, id: &str, status: WebhookStatus) -> anyhow::Result<()> {
+        match self {
+            Database::Mock(db) => db.set_webhook_status(id, status).await,
+            Database::Postgres(db) => db.set_webhook_status(id, status).await,
+        }
+    }
+
+    async fn schedule_webhook_retry(&self, id: &str, attempts: i32, next_retry_in_secs: f64) -> anyhow::Result<()> {
+        match self {
+            Database::Mock(db) => db.schedule_webhook_retry(id, attempts, next_retry_in_secs).await,
+            Database::Postgres(db) => db.schedule_webhook_retry(id, attempts, next_retry_in_secs).await,
+        }
+    }
+
+    async fn add_webhook_job(&self, invoice_id: &str, event: &WebhookEvent) -> anyhow::Result<()> {
+        match self {
+            Database::Mock(db) => db.add_webhook_job(invoice_id, event).await,
+            Database::Postgres(db) => db.add_webhook_job(invoice_id, event).await,
         }
     }
 

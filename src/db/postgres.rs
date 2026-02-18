@@ -1,6 +1,6 @@
 use crate::chain::{Blockchain, BlockchainAdapter};
 use crate::db::DatabaseAdapter;
-use crate::model::{ChainConfig, ChainType, Invoice, InvoiceStatus, PartialChainUpdate, Payment, PaymentStatus, TokenConfig};
+use crate::model::{ChainConfig, ChainType, Invoice, InvoiceStatus, PartialChainUpdate, Payment, PaymentStatus, TokenConfig, WebhookEvent, WebhookJob, WebhookStatus};
 use alloy::primitives::utils::format_units;
 use alloy::primitives::U256;
 use sqlx::postgres::PgRow;
@@ -113,6 +113,12 @@ impl Postgres {
                     .watch_addresses.write().unwrap().insert(address);
             }
         }
+        
+        sqlx::query(
+            "UPDATE webhooks SET status = 'Pending' WHERE status = 'Processing'"
+        )
+            .execute(&pool)
+            .await?;
 
         Ok(Self {
             pool,
@@ -160,6 +166,8 @@ impl Postgres {
             paid: paid_human,
             status,
             decimals,
+            webhook_url: row.get("webhook_url"),
+            webhook_secret: row.get("webhook_secret"),
             created_at: row.get("created_at"),
             expires_at: row.get("expires_at"),
         })
@@ -577,7 +585,7 @@ impl DatabaseAdapter for Postgres {
         let rows = sqlx::query(
             r#"SELECT
                        id, address, address_index, network, token, amount_raw::TEXT, paid_raw::TEXT,
-                       status, decimals, created_at, expires_at
+                       status, decimals, webhook_url, webhook_secret, created_at, expires_at
                    FROM invoices"#
         )
             .fetch_all(&self.pool)
@@ -590,7 +598,7 @@ impl DatabaseAdapter for Postgres {
         let rows = sqlx::query(
             r#"SELECT
                        id, address, address_index, network, token, amount_raw::TEXT, paid_raw::TEXT,
-                       status, decimals, created_at, expires_at
+                       status, decimals, webhook_url, webhook_secret, created_at, expires_at
                    FROM invoices WHERE network = $1"#
         )
             .bind(chain_name)
@@ -604,7 +612,7 @@ impl DatabaseAdapter for Postgres {
         let rows = sqlx::query(
             r#"SELECT
                        id, address, address_index, network, token, amount_raw::TEXT, paid_raw::TEXT,
-                       status, decimals, created_at, expires_at
+                       status, decimals, webhook_url, webhook_secret, created_at, expires_at
                    FROM invoices WHERE token = $1"#
         )
             .bind(token_symbol)
@@ -618,7 +626,7 @@ impl DatabaseAdapter for Postgres {
         let rows = sqlx::query(
             r#"SELECT
                        id, address, address_index, network, token, amount_raw::TEXT, paid_raw::TEXT,
-                       status, decimals, created_at, expires_at
+                       status, decimals, webhook_url, webhook_secret, created_at, expires_at
                    FROM invoices WHERE address = $1"#
         )
             .bind(address)
@@ -634,7 +642,7 @@ impl DatabaseAdapter for Postgres {
         let row = sqlx::query(
             r#"SELECT
                        id, address, address_index, network, token, amount_raw::TEXT, paid_raw::TEXT,
-                       status, decimals, created_at, expires_at
+                       status, decimals, webhook_url, webhook_secret, created_at, expires_at
                    FROM invoices WHERE id = $1"#
         )
             .bind(uuid_parsed)
@@ -651,7 +659,7 @@ impl DatabaseAdapter for Postgres {
         let rows = sqlx::query(
             r#"SELECT
                        id, address, address_index, network, token, amount_raw::TEXT, paid_raw::TEXT,
-                       status, decimals, created_at, expires_at
+                       status, decimals, webhook_url, webhook_secret, created_at, expires_at
                    FROM invoices WHERE status = $1"#
         )
             .bind(status.to_string())
@@ -667,7 +675,7 @@ impl DatabaseAdapter for Postgres {
         let rows = sqlx::query(
             r#"SELECT
                        id, address, address_index, network, token, amount_raw::TEXT, paid_raw::TEXT,
-                       status, decimals, created_at, expires_at
+                       status, decimals, webhook_url, webhook_secret, created_at, expires_at
                    FROM invoices WHERE network = $1 AND status = $2"#
         )
             .bind(chain_name)
@@ -684,7 +692,7 @@ impl DatabaseAdapter for Postgres {
         let rows = sqlx::query(
             r#"SELECT
                        id, address, address_index, network, token, amount_raw::TEXT, paid_raw::TEXT,
-                       status, decimals, created_at, expires_at
+                       status, decimals, webhook_url, webhook_secret, created_at, expires_at
                    FROM invoices WHERE address = $1 AND status = $1"#
         )
             .bind(address)
@@ -716,8 +724,8 @@ impl DatabaseAdapter for Postgres {
         sqlx::query(
             r#"INSERT INTO invoices
                    (id, address, address_index, network, token, amount_raw, paid_raw, status,
-                    created_at, expires_at, decimals)
-                   VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)"#
+                    created_at, expires_at, decimals, webhook_url, webhook_secret)
+                   VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)"#
         )
             .bind(uuid)
             .bind(&invoice.address)
@@ -730,6 +738,8 @@ impl DatabaseAdapter for Postgres {
             .bind(invoice.created_at)
             .bind(invoice.expires_at)
             .bind(invoice.decimals as i16)
+            .bind(&invoice.webhook_url)
+            .bind(&invoice.webhook_secret)
             .execute(&self.pool)
             .await?;
 
@@ -787,7 +797,7 @@ impl DatabaseAdapter for Postgres {
         let row = sqlx::query(
             r#"SELECT
                        id, address, address_index, network, token, amount_raw::TEXT, paid_raw::TEXT,
-                       status, decimals, created_at, expires_at
+                       status, decimals, created_at, expires_at, webhook_url, webhook_secret
                    FROM invoices WHERE network = $1 AND address = $2 AND status = 'Pending'"#
         )
             .bind(chain_name)
@@ -966,6 +976,84 @@ impl DatabaseAdapter for Postgres {
         Ok(())
     }
 
+    async fn select_webhooks_job(&self) -> anyhow::Result<Vec<WebhookJob>> {
+        let jobs: Vec<WebhookJob> = sqlx::query_as(
+            r#"UPDATE webhooks w
+                       SET status = 'processing'
+                       FROM invoices i
+                       WHERE w.invoice_id = i.id
+                           AND w.id IN (
+                               SELECT id FROM webhooks
+                               WHERE status = 'pending' AND next_retry <= NOW()
+                               LIMIT 50
+                               FOR UPDATE SKIP LOCKED
+                           )
+                       RETURNING w.id, w.url, w.payload, w.max_retries, w.attempts, i.webhook_secret as "secret_key!"
+                           "#
+        )
+            .fetch_all(&self.pool)
+            .await?;
+
+        Ok(jobs)
+    }
+
+    async fn set_webhook_status(&self, id: &str, status: WebhookStatus) -> anyhow::Result<()> {
+        sqlx::query(
+            "UPDATE webhooks SET status = $1 WHERE id = $2"
+        )
+            .bind(status.to_string())
+            .bind(id)
+            .execute(&self.pool)
+            .await?;
+
+        Ok(())
+    }
+
+    async fn schedule_webhook_retry(&self, id: &str, attempts: i32, next_retry_in_secs: f64) -> anyhow::Result<()> {
+        sqlx::query(
+            r#"UPDATE webhooks SET status = 'Pending', attempts = $1,
+                       next_retry = NOW() + (interval '1 second' * $2) WHERE id = $3"#
+        )
+            .bind(attempts)
+            .bind(next_retry_in_secs)
+            .bind(id)
+            .execute(&self.pool)
+            .await?;
+
+        Ok(())
+    }
+
+    async fn add_webhook_job(&self, invoice_id: &str, event: &WebhookEvent) -> anyhow::Result<()> {
+        let uuid_parsed = uuid::Uuid::parse_str(&invoice_id)?;
+
+        let url_opt: Option<String> = sqlx::query_scalar(
+            "SELECT webhook_url FROM invoices WHERE id = $1"
+        )
+            .bind(uuid_parsed)
+            .fetch_optional(&self.pool)
+            .await?;
+
+        let Some(url) = url_opt else {
+            anyhow::bail!("Invoice {} not found", invoice_id);
+        };
+
+        let event_type = event.as_ref();
+        let payload = serde_json::to_value(event)?;
+
+        sqlx::query(
+            r#"INSERT INTO webhooks (invoice_id, event_type, url, payload)
+                       VALUES ($1, $2, $3, $4)"#
+        )
+            .bind(uuid_parsed)
+            .bind(event_type)
+            .bind(url)
+            .bind(payload)
+            .execute(&self.pool)
+            .await?;
+
+        Ok(())
+    }
+
     async fn get_token_decimals(&self, chain_name: &str, token_symbol: &str) -> anyhow::Result<Option<u8>> {
         if let Some(d) = self._get_token_decimals_cached(chain_name, token_symbol) {
             return Ok(Some(d));
@@ -989,6 +1077,7 @@ impl DatabaseAdapter for Postgres {
 
         Ok(None)
     }
+
 }
 
 impl Postgres {

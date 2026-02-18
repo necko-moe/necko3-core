@@ -4,6 +4,7 @@ use tokio::task::JoinHandle;
 use crate::AppState;
 use crate::chain::BlockchainAdapter;
 use crate::db::DatabaseAdapter;
+use crate::model::WebhookEvent;
 
 pub fn start_confirmator(state: Arc<AppState>, interval: Duration) -> JoinHandle<()> {
     tokio::spawn(async move {
@@ -49,13 +50,39 @@ pub fn start_confirmator(state: Arc<AppState>, interval: Duration) -> JoinHandle
                             println!("payment {} confirmed and verified! finalizing...", payment.tx_hash);
                             match state.db.finalize_payment(&payment.id).await {
                                 Ok(true) => {
+                                    let invoice = match state.db.get_invoice(&payment.invoice_id).await { 
+                                        Ok(Some(invoice)) => invoice,
+                                        Ok(None) => {
+                                            eprintln!("Error getting invoice {} (not found)", payment.invoice_id);
+                                            continue;
+                                        }
+                                        Err(e) => {
+                                            eprintln!("Error getting invoice {}: {}", payment.invoice_id, e);
+                                            continue;
+                                        }
+                                    };
+                                    
+                                    if let Err(e) = state.db.add_webhook_job(&payment.invoice_id, &WebhookEvent::InvoicePaid {
+                                        invoice_id: payment.invoice_id.clone(),
+                                        paid_amount: invoice.paid,
+                                    }).await {
+                                        eprintln!("Error adding webhook job (InvoicePaid) for {}: {}", payment.invoice_id, e);
+                                    }
                                     if let Err(e) = state.db.remove_watch_address(
                                         &payment.network, &payment.to).await
                                     {
                                         eprintln!("Error deleting watch address {}: {}", payment.id, e);
                                     }
                                 }
-                                Ok(false) => {},
+                                Ok(false) => {
+                                    if let Err(e) = state.db.add_webhook_job(&payment.invoice_id, &WebhookEvent::TxConfirmed {
+                                        invoice_id: payment.invoice_id.clone(),
+                                        tx_hash: payment.tx_hash,
+                                        confirmations: required,
+                                    }).await {
+                                        eprintln!("Error adding webhook job (TxConfirmed) for {}: {}", payment.invoice_id, e);
+                                    }
+                                },
                                 Err(e) => eprintln!("Error finalizing payment {}: {}", payment.id, e),
                             }
                         }

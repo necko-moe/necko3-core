@@ -1,17 +1,31 @@
 use crate::chain::{Blockchain, BlockchainAdapter};
 use crate::db::DatabaseAdapter;
-use crate::model::{ChainConfig, Invoice, InvoiceStatus, PartialChainUpdate, Payment, PaymentStatus, TokenConfig};
+use crate::model::{ChainConfig, Invoice, InvoiceStatus, PartialChainUpdate, Payment, PaymentStatus, TokenConfig, WebhookEvent, WebhookJob, WebhookStatus};
 use alloy::primitives::utils::format_units;
 use alloy::primitives::U256;
 use dashmap::DashMap;
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
+use std::time::Duration;
+use chrono::Utc;
 
 pub struct MockDatabase {
     chains: RwLock<HashMap<String, Arc<Blockchain>>>, // key = chain name
     invoices: DashMap<String, Invoice>, // key = id/uuid
     token_decimals: RwLock<HashMap<String, HashMap<String, u8>>>, // (chain_name, (token_symbol, decimals))
-    payments: DashMap<String, Payment>,
+    payments: DashMap<String, Payment>, // key = invoice_id
+    webhooks: DashMap<String, MockWebhook>, // key = id/uuid
+}
+
+struct MockWebhook {
+    id: uuid::Uuid,
+    invoice_id: uuid::Uuid,
+    url: String,
+    payload: WebhookEvent,
+    status: WebhookStatus,
+    attempts: u32,
+    max_retries: u32,
+    next_retry: chrono::DateTime<Utc>,
 }
 
 impl MockDatabase {
@@ -21,11 +35,13 @@ impl MockDatabase {
             invoices: DashMap::new(),
             token_decimals: RwLock::new(HashMap::new()),
             payments: DashMap::new(),
+            webhooks: DashMap::new(),
         }
     }
 }
 
 impl DatabaseAdapter for MockDatabase {
+
     async fn get_chains_map(&self) -> anyhow::Result<HashMap<String, Arc<Blockchain>>> {
         Ok(self.chains.read().unwrap().clone())
     }
@@ -483,6 +499,85 @@ impl DatabaseAdapter for MockDatabase {
     async fn update_payment_block(&self, payment_id: &str, block_num: u64) -> anyhow::Result<()> {
         self.payments.get_mut(payment_id).unwrap().block_number = block_num;
 
+        Ok(())
+    }
+
+    async fn select_webhooks_job(&self) -> anyhow::Result<Vec<WebhookJob>> {
+        let now = Utc::now();
+        let mut jobs = Vec::new();
+
+        let target_ids: Vec<String> = self.webhooks.iter()
+            .filter(|r| r.status == WebhookStatus::Pending && r.next_retry <= now)
+            .take(50)
+            .map(|r| r.key().clone())
+            .collect();
+
+        for id in target_ids {
+            if let Some(mut job) = self.webhooks.get_mut(&id) {
+                job.status = WebhookStatus::Processing;
+
+                let secret = self.invoices.get(&job.invoice_id.to_string())
+                    .map(|inv| inv.webhook_secret.clone())
+                    .flatten()
+                    .unwrap_or_else(|| "default_secret".to_owned());
+
+                jobs.push(WebhookJob {
+                    id: job.id,
+                    url: job.url.clone(),
+                    secret_key: secret,
+                    payload: sqlx::types::Json(job.payload.clone()),
+                    max_retries: job.max_retries as i32,
+                    attempts: job.attempts as i32,
+                });
+            }
+        }
+
+        Ok(jobs)
+    }
+
+    async fn set_webhook_status(&self, id: &str, status: WebhookStatus) -> anyhow::Result<()> {
+        if let Some(mut job) = self.webhooks.get_mut(id) {
+            job.status = status;
+            Ok(())
+        } else {
+            anyhow::bail!("Webhook job {} not found", id)
+        }
+    }
+
+    async fn schedule_webhook_retry(&self, id: &str, attempts: i32, next_retry_in_secs: f64) -> anyhow::Result<()> {
+        if let Some(mut job) = self.webhooks.get_mut(id) {
+            job.status = WebhookStatus::Pending;
+            job.attempts = attempts as u32;
+            job.next_retry = Utc::now() + Duration::from_secs_f64(next_retry_in_secs);
+            Ok(())
+        } else {
+            anyhow::bail!("Webhook job {} not found", id)
+        }
+    }
+
+    async fn add_webhook_job(&self, invoice_id: &str, event: &WebhookEvent) -> anyhow::Result<()> {
+        let inv_id = uuid::Uuid::parse_str(invoice_id)?;
+
+        let invoice = self.invoices.get(invoice_id)
+            .ok_or_else(|| anyhow::anyhow!("Invoice {} not found", invoice_id))?;
+
+        if invoice.webhook_url.is_none() {
+            return Ok(());
+        }
+
+        let job_id = uuid::Uuid::new_v4();
+        let job = MockWebhook {
+            id: job_id,
+            invoice_id: inv_id,
+            url: invoice.webhook_url.clone().unwrap(),
+            payload: event.clone(),
+            status: WebhookStatus::Pending,
+            attempts: 0,
+            max_retries: 10,
+            next_retry: Utc::now(),
+        };
+
+        self.webhooks.insert(job_id.to_string(), job);
         Ok(())
     }
 
