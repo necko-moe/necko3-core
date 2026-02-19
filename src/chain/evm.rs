@@ -20,7 +20,8 @@ use std::time::Duration;
 use tokio::sync::mpsc::Sender;
 use url::Url;
 
-type EvmProvider = FillProvider<JoinFill<Identity, JoinFill<GasFiller, JoinFill<BlobGasFiller, JoinFill<NonceFiller, ChainIdFiller>>>>, RootProvider>;
+type EvmProvider = FillProvider<JoinFill<Identity, JoinFill<GasFiller, JoinFill<BlobGasFiller,
+    JoinFill<NonceFiller, ChainIdFiller>>>>, RootProvider>;
 
 sol! {
     #[derive(Debug)]

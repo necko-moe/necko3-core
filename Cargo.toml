@@ -9,7 +9,7 @@ anyhow = "1"
 
 url = "2.5"
 
-alloy = { version = "1.6", features = ["full"] }
+alloy = { version = "1.7", features = ["full"] }
 coins-bip32 = "0.13"
 
 serde = { version = "1", features = ["derive"] }
