@@ -1,0 +1,1 @@
+ALTER TABLE payments ALTER COLUMN log_index TYPE BIGINT;

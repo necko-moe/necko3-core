@@ -83,7 +83,7 @@ pub async fn process_webhook(
         }
         _ => {
             let new_attempts = job.attempts + 1;
-            if new_attempts >= 10 {
+            if new_attempts >= job.max_retries {
                 eprintln!("Failed to send webhook after {} attempts", job.attempts);
                 db.set_webhook_status(&job.id.to_string(), WebhookStatus::Failed).await?;
                 return Ok(())
