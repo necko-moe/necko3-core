@@ -75,8 +75,9 @@ pub trait DatabaseAdapter: Send + Sync {
     fn remove_invoice(&self, uuid: &str) -> impl Future<Output = anyhow::Result<()>> + Send;
 
     // payments
-    fn add_payment_attempt(&self, invoice_id: &str, from: &str, to: &str, tx_hash: &str, amount_raw: U256,
-                           block_number: u64, network: &str) -> impl Future<Output = anyhow::Result<()>> + Send;
+    fn add_payment_attempt(&self, invoice_id: &str, from: &str, to: &str, tx_hash: &str,
+                           amount_raw: U256, block_number: u64, network: &str, log_index: Option<u64>)
+        -> impl Future<Output = anyhow::Result<()>> + Send;
     fn get_confirming_payments(&self) -> impl Future<Output = anyhow::Result<Vec<Payment>>> + Send;
     fn finalize_payment(&self, payment_id: &str) -> impl Future<Output = anyhow::Result<bool>> + Send;
     fn update_payment_block(&self, payment_id: &str, block_num: u64) -> impl Future<Output = anyhow::Result<()>> + Send;
@@ -439,12 +440,13 @@ impl DatabaseAdapter for Database {
     }
 
     async fn add_payment_attempt(&self, invoice_id: &str, from: &str, to: &str, tx_hash: &str,
-                                 amount_raw: U256, block_number: u64, network: &str) -> anyhow::Result<()> {
+                                 amount_raw: U256, block_number: u64, network: &str,
+                                 log_index: Option<u64>) -> anyhow::Result<()> {
         match self {
             Database::Mock(db) => db.add_payment_attempt(invoice_id, from, to, tx_hash,
-                                                         amount_raw, block_number, network).await,
+                                                         amount_raw, block_number, network, log_index).await,
             Database::Postgres(db) => db.add_payment_attempt(invoice_id, from, to, tx_hash,
-                                                             amount_raw, block_number, network).await,
+                                                             amount_raw, block_number, network, log_index).await,
         }
     }
 

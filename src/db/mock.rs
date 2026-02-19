@@ -433,7 +433,8 @@ impl DatabaseAdapter for MockDatabase {
     }
 
     async fn add_payment_attempt(&self, invoice_id: &str, from: &str, to: &str, tx_hash: &str,
-                                 amount_raw: U256, block_number: u64, network: &str) -> anyhow::Result<()> {
+                                 amount_raw: U256, block_number: u64, network: &str,
+                                 log_index: Option<u64>) -> anyhow::Result<()> {
         let mut contains = false;
 
         if self.payments.contains_key(invoice_id) {
@@ -457,6 +458,7 @@ impl DatabaseAdapter for MockDatabase {
             block_number,
             status: PaymentStatus::Confirming,
             created_at: chrono::Utc::now(),
+            log_index: log_index.unwrap_or(u64::MAX),
         });
 
         Ok(())

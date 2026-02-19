@@ -198,6 +198,7 @@ impl Postgres {
             block_number: row.get::<i64, _>("block_number") as u64,
             status,
             created_at: row.get("created_at"),
+            log_index: row.get::<i64, _>("log_index") as u64,
         })
     }
 }
@@ -884,15 +885,16 @@ impl DatabaseAdapter for Postgres {
     }
 
     async fn add_payment_attempt(&self, invoice_id: &str, from: &str, to: &str, tx_hash: &str,
-                                 amount_raw: U256, block_number: u64, network: &str) -> anyhow::Result<()> {
+                                 amount_raw: U256, block_number: u64, network: &str,
+                                 log_index: Option<u64>) -> anyhow::Result<()> {
         let invoice_uuid_parsed = uuid::Uuid::parse_str(invoice_id)?;
         let amount_bd = BigDecimal::from_str(&amount_raw.to_string())?;
 
         sqlx::query(
             r#"INSERT INTO payments (invoice_id, "from", "to", network, tx_hash, amount_raw,
-                      block_number, status)
-                   VALUES ($1, $2, $3, $4, $5, $6, $7, 'Confirming')
-                   ON CONFLICT (invoice_id, tx_hash)
+                      block_number, status, log_index)
+                   VALUES ($1, $2, $3, $4, $5, $6, $7, 'Confirming', $8)
+                   ON CONFLICT (tx_hash, log_index, network)
                    DO UPDATE SET block_number = excluded.block_number"#
         )
             .bind(invoice_uuid_parsed)
@@ -902,6 +904,7 @@ impl DatabaseAdapter for Postgres {
             .bind(tx_hash)
             .bind(amount_bd)
             .bind(block_number as i64)
+            .bind(log_index.map(|x| x as i64))
             .execute(&self.pool)
             .await?;
 
@@ -911,7 +914,7 @@ impl DatabaseAdapter for Postgres {
     async fn get_confirming_payments(&self) -> anyhow::Result<Vec<Payment>> {
         let rows = sqlx::query(
             r#"SELECT id, invoice_id, "from", "to", network, tx_hash,
-                       amount_raw::TEXT, block_number, status, created_at
+                       amount_raw::TEXT, block_number, status, created_at, log_index
                    FROM payments WHERE status = 'Confirming'"#)
             .fetch_all(&self.pool)
             .await?;

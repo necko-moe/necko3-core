@@ -26,7 +26,8 @@ pub fn start_invoice_watcher(state: Arc<AppState>, mut rx: Receiver<PaymentEvent
                 &event.tx_hash.to_string(),
                 event.amount_raw,
                 event.block_number,
-                &event.network
+                &event.network,
+                event.log_index
             ).await {
                 Ok(_) => {
                     if let Err(e) = state.db.add_webhook_job(&invoice.id, &WebhookEvent::TxDetected {

@@ -5,7 +5,7 @@ use crate::model::{ChainConfig, PaymentEvent};
 use alloy::consensus::Transaction;
 use alloy::network::TransactionResponse;
 use alloy::primitives::utils::format_units;
-use alloy::primitives::{Address, BlockNumber, TxHash};
+use alloy::primitives::{Address, TxHash, B256};
 use alloy::providers::fillers::{BlobGasFiller, ChainIdFiller, FillProvider, GasFiller, JoinFill, NonceFiller};
 use alloy::providers::{Identity, Provider, ProviderBuilder, RootProvider};
 use alloy::rpc::types::Transaction as RpcTransaction;
@@ -100,40 +100,51 @@ impl BlockchainAdapter for EvmBlockchain {
             for block_num in (last_block_num + 1)..=current_block_num {
                 println!("processing block {}...", block_num);
 
-                if let Some(block) = self.provider
-                    .get_block_by_number(block_num.into())
-                    .full()
-                    .await
-                    .ok()
-                    .flatten()
-                {
-                    let transactions = process_block(&address_set, block)
-                        .unwrap_or_default();
-
-                    if !transactions.is_empty() {
-                        for tx in transactions {
-                            let amount_human = format_units(tx.value(), decimals)?;
-
-                            let event = PaymentEvent {
-                                network: self.chain_name.clone(),
-                                tx_hash: tx.tx_hash(),
-                                from: tx.from().to_string(),
-                                to: tx.to().unwrap_or_default().to_string(), // default is unreachable,
-                                // but it's better to keep this instead of ::unwrap()
-                                token: native_symbol.clone(),
-                                amount: amount_human,
-                                amount_raw: tx.value(),
-                                decimals,
-                                block_number: block_num,
-                            };
-
-                            let _ = sender.send(event).await;
+                let block = loop { // NEVER SKIP ANY BLOCK
+                    match self.provider.get_block_by_number(block_num.into()).full().await {
+                        Ok(Some(b)) => break b,
+                        Ok(None) => {
+                            eprintln!("Block {} not found (node lag?). Retrying in 1s...",
+                                      block_num);
+                            tokio::time::sleep(Duration::from_secs(1)).await;
                         }
+                        Err(e) => {
+                            eprintln!("RPC Error fetching block {}: {}. Retrying in 1s...",
+                                      block_num, e);
+                            tokio::time::sleep(Duration::from_secs(1)).await;
+                        }
+                    }
+                };
+
+                let block_hash = block.hash();
+
+                let transactions = process_block(&address_set, block)
+                    .unwrap_or_default();
+
+                if !transactions.is_empty() {
+                    for tx in transactions {
+                        let amount_human = format_units(tx.value(), decimals)?;
+
+                        let event = PaymentEvent {
+                            network: self.chain_name.clone(),
+                            tx_hash: tx.tx_hash(),
+                            from: tx.from().to_string(),
+                            to: tx.to().unwrap_or_default().to_string(), // default is unreachable,
+                            // but it's better to keep this instead of ::unwrap()
+                            token: native_symbol.clone(),
+                            amount: amount_human,
+                            amount_raw: tx.value(),
+                            decimals,
+                            block_number: block_num,
+                            log_index: None,
+                        };
+
+                        let _ = sender.send(event).await;
                     }
                 }
 
                 let sender = sender.clone();
-                self.process_logs(block_num, &address_set, sender).await?;
+                self.process_logs(block_hash, &address_set, sender).await?;
             }
 
             last_block_num = current_block_num;
@@ -163,7 +174,7 @@ impl BlockchainAdapter for EvmBlockchain {
 impl EvmBlockchain {
     async fn process_logs(
         &self,
-        block_number: BlockNumber,
+        block_hash: B256,
         addresses: &HashSet<Address>,
         sender: Sender<PaymentEvent>,
     ) -> anyhow::Result<()> {
@@ -176,17 +187,17 @@ impl EvmBlockchain {
         if token_addresses.is_empty() { return Ok(()); }
 
         let filter = Filter::new()
-            .from_block(block_number)
-            .to_block(block_number)
+            .at_block_hash(block_hash)
             .address(token_addresses)
             .event("Transfer(address,address,uint256)");
 
-        let logs = match self.provider.get_logs(&filter).await {
-            Ok(l) => l,
-            Err(e) => {
-                eprintln!("failed to get logs from {}: {}. Retrying in 3s...", self.chain_name, e);
-                tokio::time::sleep(Duration::from_secs(3)).await;
-                self.provider.get_logs(&filter).await.unwrap_or_default()
+        let logs = loop { // DO. NOT. SKIP. LOGS.
+            match self.provider.get_logs(&filter).await {
+                Ok(l) => break l,
+                Err(e) => {
+                    eprintln!("failed to get logs from {}: {}. Retrying in 2s...", self.chain_name, e);
+                    tokio::time::sleep(Duration::from_secs(2)).await;
+                }
             }
         };
 
@@ -195,24 +206,27 @@ impl EvmBlockchain {
         for log in logs {
             if let Ok(transfer) = log.log_decode::<Transfer>() {
                 let event_data = transfer.inner;
+                let address = event_data.address;
 
                 if addresses.contains(&event_data.to) {
                     let token_conf = match token_configs.entry(event_data.address) {
                         Entry::Occupied(entry) => entry.into_mut(),
                         Entry::Vacant(entry) => {
-                            let address = event_data.address.to_string();
-
                             let maybe_conf = self.chain_config.read().unwrap()
                                 .tokens.read().unwrap()
                                 .iter()
-                                .find(|tc| tc.contract == address.as_str())
+                                .find(|tc| {
+                                    let conf_addr = Address::from_str(&tc.contract)
+                                        .unwrap_or_default();
+                                    conf_addr == address
+                                })
                                 .cloned();
 
                             match maybe_conf {
                                 Some(tc) => entry.insert(tc),
                                 None => {
                                     eprintln!("(should be unreachable) received log from UNKNOWN \
-                                    contract {}", event_data.address);
+                                    contract {}", address);
                                     continue;
                                 }
                             }
@@ -231,7 +245,9 @@ impl EvmBlockchain {
                         amount: amount_human,
                         amount_raw: event_data.value,
                         decimals: token_conf.decimals,
-                        block_number,
+                        block_number: log.block_number
+                            .unwrap_or(u64::MAX),
+                        log_index: log.log_index,
                     };
 
                     let _ = sender.send(event).await;
@@ -252,8 +268,10 @@ fn process_block(
     let transactions = txs
         .into_iter()
         .filter(|tx| {
-            tx.to().map_or(false, |to|
-                addresses.contains(&to))
+            match tx.to() {
+                Some(to) => addresses.contains(&to) && tx.value() > 0,
+                None => false
+            }
         })
         .collect();
 

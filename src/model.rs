@@ -46,6 +46,7 @@ pub struct Payment {
     #[schema(value_type = String, example = "1000000000000000000")]
     pub amount_raw: U256,
     pub block_number: u64,
+    pub log_index: u64,
     pub status: PaymentStatus,
     pub created_at: DateTime<Utc>,
 }
@@ -68,6 +69,7 @@ pub struct PaymentEvent {
     pub amount_raw: U256,
     pub decimals: u8,
     pub block_number: u64,
+    pub log_index: Option<u64>,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, ToSchema,
