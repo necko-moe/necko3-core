@@ -99,14 +99,28 @@ impl BlockchainAdapter for EvmBlockchain {
             for block_num in (last_block_num + 1)..=current_block_num {
                 println!("processing block {}...", block_num);
 
-                let block_json: Value = loop {
-                    match self.provider.raw_request(
+                let (block_json, block_hash): (Value, BlockHash) = loop {
+                    let bj: Value = match self.provider.raw_request(
                         "eth_getBlockByNumber".into(),
                         (format!("0x{:x}", block_num), true),
                     ).await {
-                        Ok(v) => break v,
+                        Ok(v) => v,
                         Err(e) => {
-                            eprintln!("RPC Error: {}. Retrying...", e);
+                            eprintln!("RPC Error: {}. Retrying in 1s...", e);
+                            tokio::time::sleep(Duration::from_secs(1)).await;
+                            continue;
+                        }
+                    };
+
+                    if !bj["error"].is_null() { // actually I don't know if node can return that
+                        eprintln!("RPC Node error for block {}: {}", block_num, bj["error"]);
+                    }
+
+                    let block_hash_str = bj["hash"].as_str().unwrap_or_default();
+                    match block_hash_str.parse::<BlockHash>() {
+                        Ok(block_hash) => break (bj, block_hash),
+                        Err(e) => {
+                            eprintln!("Failed to parse block hash: {}. Retrying in 1s...", e);
                             tokio::time::sleep(Duration::from_secs(1)).await;
                             continue;
                         }
@@ -151,13 +165,7 @@ impl BlockchainAdapter for EvmBlockchain {
                 }
 
                 let sender = sender.clone();
-                let block_hash_str = block_json["hash"].as_str().unwrap_or_default();
-                match block_hash_str.parse::<BlockHash>() {
-                    Ok(block_hash) => self.process_logs(block_hash, &address_set, sender).await?,
-                    Err(e) => {
-                        eprintln!("Failed to parse block hash: {}. skipping...", e);
-                    }
-                }
+                self.process_logs(block_hash, &address_set, sender).await?;
             }
 
             last_block_num = current_block_num;
