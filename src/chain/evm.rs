@@ -121,6 +121,10 @@ impl BlockchainAdapter for EvmBlockchain {
                         let from_str = tx["from"].as_str().unwrap_or_default();
 
                         if let Ok(to_addr) = to_str.parse::<Address>() {
+                            if !address_set.contains(&to_addr) {
+                                continue
+                            }
+
                             let value = U256::from_str_radix(value_hex.trim_start_matches("0x"), 16)
                                 .unwrap_or(U256::ZERO);
 
