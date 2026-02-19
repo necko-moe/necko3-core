@@ -2,16 +2,14 @@ use crate::chain::BlockchainAdapter;
 use crate::db::{Database, DatabaseAdapter};
 use crate::model::TokenConfig;
 use crate::model::{ChainConfig, PaymentEvent};
-use alloy::consensus::Transaction;
-use alloy::network::TransactionResponse;
 use alloy::primitives::utils::format_units;
-use alloy::primitives::{Address, TxHash, B256};
+use alloy::primitives::{Address, BlockHash, TxHash, B256, U256};
 use alloy::providers::fillers::{BlobGasFiller, ChainIdFiller, FillProvider, GasFiller, JoinFill, NonceFiller};
 use alloy::providers::{Identity, Provider, ProviderBuilder, RootProvider};
-use alloy::rpc::types::Transaction as RpcTransaction;
-use alloy::rpc::types::{Block, Filter};
+use alloy::rpc::types::Filter;
 use alloy::sol;
 use coins_bip32::prelude::{Parent, XPub};
+use serde_json::Value;
 use std::collections::hash_map::Entry;
 use std::collections::{HashMap, HashSet};
 use std::str::FromStr;
@@ -101,51 +99,61 @@ impl BlockchainAdapter for EvmBlockchain {
             for block_num in (last_block_num + 1)..=current_block_num {
                 println!("processing block {}...", block_num);
 
-                let block = loop { // NEVER SKIP ANY BLOCK
-                    match self.provider.get_block_by_number(block_num.into()).full().await {
-                        Ok(Some(b)) => break b,
-                        Ok(None) => {
-                            eprintln!("Block {} not found (node lag?). Retrying in 1s...",
-                                      block_num);
-                            tokio::time::sleep(Duration::from_secs(1)).await;
-                        }
+                let block_json: Value = loop {
+                    match self.provider.raw_request(
+                        "eth_getBlockByNumber".into(),
+                        (format!("0x{:x}", block_num), true),
+                    ).await {
+                        Ok(v) => break v,
                         Err(e) => {
-                            eprintln!("RPC Error fetching block {}: {}. Retrying in 1s...",
-                                      block_num, e);
+                            eprintln!("RPC Error: {}. Retrying...", e);
                             tokio::time::sleep(Duration::from_secs(1)).await;
+                            continue;
                         }
                     }
                 };
 
-                let block_hash = block.hash();
-
-                let transactions = process_block(&address_set, block)
-                    .unwrap_or_default();
-
-                if !transactions.is_empty() {
+                if let Some(transactions) = block_json["transactions"].as_array() {
                     for tx in transactions {
-                        let amount_human = format_units(tx.value(), decimals)?;
+                        let to_str = tx["to"].as_str().unwrap_or_default();
+                        let value_hex = tx["value"].as_str().unwrap_or("0x0");
+                        let tx_hash = tx["hash"].as_str().unwrap_or_default();
+                        let from_str = tx["from"].as_str().unwrap_or_default();
 
-                        let event = PaymentEvent {
-                            network: self.chain_name.clone(),
-                            tx_hash: tx.tx_hash(),
-                            from: tx.from().to_string(),
-                            to: tx.to().unwrap_or_default().to_string(), // default is unreachable,
-                            // but it's better to keep this instead of ::unwrap()
-                            token: native_symbol.clone(),
-                            amount: amount_human,
-                            amount_raw: tx.value(),
-                            decimals,
-                            block_number: block_num,
-                            log_index: None,
-                        };
+                        if let Ok(to_addr) = to_str.parse::<Address>() {
+                            let value = U256::from_str_radix(value_hex.trim_start_matches("0x"), 16)
+                                .unwrap_or(U256::ZERO);
 
-                        let _ = sender.send(event).await;
+                            if value > U256::ZERO {
+                                let amount_human = format_units(value, decimals).unwrap_or_default();
+
+                                let event = PaymentEvent {
+                                    network: self.chain_name.clone(),
+                                    tx_hash: tx_hash.parse().unwrap_or_default(),
+                                    from: from_str.to_string(),
+                                    to: to_addr.to_string(),
+                                    token: native_symbol.clone(),
+                                    amount: amount_human,
+                                    amount_raw: value,
+                                    decimals,
+                                    block_number: block_num,
+                                    log_index: None,
+                                };
+
+                                let _ = sender.send(event).await;
+                            }
+                        }
                     }
                 }
 
                 let sender = sender.clone();
-                self.process_logs(block_hash, &address_set, sender).await?;
+                let block_hash_str = block_json["hash"].as_str().unwrap_or_default();
+                match block_hash_str.parse::<BlockHash>() {
+                    Ok(block_hash) => self.process_logs(block_hash, &address_set, sender).await?,
+                    Err(e) => {
+                        eprintln!("Failed to parse block hash: {}. skipping...", e);
+                    }
+                }
             }
 
             last_block_num = current_block_num;
@@ -258,23 +266,4 @@ impl EvmBlockchain {
 
         Ok(())
     }
-}
-
-fn process_block(
-    addresses: &HashSet<Address>,
-    block: Block,
-) -> anyhow::Result<Vec<RpcTransaction>> {
-    let txs = block.into_transactions_vec();
-
-    let transactions = txs
-        .into_iter()
-        .filter(|tx| {
-            match tx.to() {
-                Some(to) => addresses.contains(&to) && tx.value() > 0,
-                None => false
-            }
-        })
-        .collect();
-
-    Ok(transactions)
 }
