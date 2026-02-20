@@ -9,41 +9,61 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio::task::JoinHandle;
 
+use tracing::{debug, error, info, instrument, trace, warn, Instrument};
+
+#[instrument(skip(state))]
 pub fn start_webhook_dispatcher(state: Arc<AppState>) -> JoinHandle<()> {
+    info!("Starting webhook dispatcher service");
+
+    let span = tracing::info_span!("webhook_service");
+
     tokio::spawn(async move {
         let client = Arc::new(Client::new());
 
         loop {
             let jobs_result: anyhow::Result<Vec<WebhookJob>> = state.db.select_webhooks_job().await;
+
             let jobs = match jobs_result {
                 Ok(j) => j,
                 Err(e) => {
-                    eprintln!("Failed to select webhooks job: {}... Retrying in 5 seconds", e);
+                    error!(error = %e, "Failed to select webhook jobs from DB. Retrying in 5s...");
                     tokio::time::sleep(Duration::from_secs(5)).await;
                     continue
                 }
             };
 
             if jobs.is_empty() {
+                trace!("No pending webhooks found, sleeping 500ms...");
                 tokio::time::sleep(Duration::from_millis(500)).await;
                 continue;
             }
+
+            debug!(count = jobs.len(), "Found pending webhook jobs");
 
             for job in jobs {
                 let client_clone = client.clone();
                 let db_clone = state.db.clone();
 
+                let job_span = tracing::info_span!(
+                    "webhook_job",
+                    job_id = %job.id,
+                    url = %job.url,
+                    attempt = job.attempts
+                );
+
                 tokio::spawn(async move {
                     if let Err(e) = process_webhook(db_clone, client_clone, job).await {
-                        eprintln!("Failed to process webhook: {:?}", e);
+                        error!(error = %e, "Failed to process webhook");
                     }
-                });
+                }.instrument(job_span));
             }
         }
-    })
+    }.instrument(span))
 }
 
+#[instrument(level = "trace", skip(secret, body))] // :)
 fn generate_signature(timestamp: &str, secret: &str, body: &str) -> anyhow::Result<String> {
+    trace!("Generating HMAC signature");
     let signed_body = format!("{}.{}", timestamp, body);
 
     let mut mac = Hmac::<Sha256>::new_from_slice(secret.as_bytes())?;
@@ -53,6 +73,7 @@ fn generate_signature(timestamp: &str, secret: &str, body: &str) -> anyhow::Resu
     Ok(hex::encode(result.into_bytes()))
 }
 
+#[instrument(skip_all, err)]
 pub async fn process_webhook(
     db: Arc<Database>,
     client: Arc<Client>,
@@ -60,11 +81,17 @@ pub async fn process_webhook(
 ) -> anyhow::Result<()> {
     let now = Utc::now().timestamp().to_string();
     let body_string = serde_json::to_string(&job.payload.0)
-        .map_err(|e| anyhow::anyhow!(e))?;
+        .map_err(|e| {
+            error!(error = %e, "Failed to serialize webhook payload");
+            anyhow::anyhow!(e)
+        })?;
 
     let signature = generate_signature(&now, &job.secret_key, &body_string)?;
 
-    println!("Sending webhook (attempt {}/{}) to {}", job.attempts, job.max_retries, job.url);
+    debug!(
+        max = job.max_retries,
+        "Sending HTTP POST request"
+    );
 
     let result = client
         .post(&job.url)
@@ -78,21 +105,48 @@ pub async fn process_webhook(
 
     match result {
         Ok(res) if res.status().is_success() => {
-            println!("Successfully sent webhook to {}", job.url);
+            info!(status = %res.status(), "Webhook sent successfully");
             db.set_webhook_status(&job.id.to_string(), WebhookStatus::Sent).await?;
         }
-        _ => {
-            let new_attempts = job.attempts + 1;
-            if new_attempts >= job.max_retries {
-                eprintln!("Failed to send webhook after {} attempts", job.attempts);
-                db.set_webhook_status(&job.id.to_string(), WebhookStatus::Failed).await?;
-                return Ok(())
-            }
-
-            let wait_time = 2_u64.pow(new_attempts as u32);
-
-            db.schedule_webhook_retry(&job.id.to_string(), new_attempts, wait_time as f64).await?;
+        Ok(res) => {
+            let status = res.status();
+            warn!(status = %status, "Webhook server returned error status");
+            handle_retry(db, job, format!("HTTP Status {}", status)).await?;
         }
+        Err(e) => {
+            warn!(error = %e, "Network error while sending webhook");
+            handle_retry(db, job, e.to_string()).await?;
+        }
+    }
+
+    Ok(())
+}
+
+async fn handle_retry(
+    db: Arc<Database>,
+    job: WebhookJob,
+    reason: String
+) -> anyhow::Result<()> {
+    let new_attempts = job.attempts + 1;
+
+    if new_attempts >= job.max_retries {
+        error!(
+            reason = %reason,
+            attempts = new_attempts,
+            "Failed to send webhook after max retries. Giving up."
+        );
+        db.set_webhook_status(&job.id.to_string(), WebhookStatus::Failed).await?;
+    } else {
+        let wait_time = 2_u64.pow(new_attempts as u32);
+
+        warn!(
+            reason = %reason,
+            next_attempt_in = %format!("{}s", wait_time),
+            attempt = new_attempts,
+            "Scheduling webhook retry"
+        );
+
+        db.schedule_webhook_retry(&job.id.to_string(), new_attempts, wait_time as f64).await?;
     }
 
     Ok(())

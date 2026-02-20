@@ -2822,7 +2822,7 @@ dependencies = [
 
 [[package]]
 name = "necko3-core"
-version = "1.0.3"
+version = "1.0.5"
 dependencies = [
  "alloy",
  "anyhow",
@@ -2838,6 +2838,7 @@ dependencies = [
  "sqlx",
  "strum",
  "tokio",
+ "tracing",
  "url",
  "utoipa",
  "uuid",

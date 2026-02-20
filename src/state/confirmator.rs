@@ -6,93 +6,165 @@ use crate::chain::BlockchainAdapter;
 use crate::db::DatabaseAdapter;
 use crate::model::WebhookEvent;
 
+use tracing::{debug, error, info, instrument, trace, warn, Instrument};
+
+#[instrument(skip(state))]
 pub fn start_confirmator(state: Arc<AppState>, interval: Duration) -> JoinHandle<()> {
+    info!(?interval, "Starting payment confirmator service");
+
+    let span = tracing::info_span!("confirmator_svc");
+
     tokio::spawn(async move {
-        let mut interval = tokio::time::interval(interval);
+        let mut interval_timer = tokio::time::interval(interval);
 
         loop {
-            interval.tick().await;
+            interval_timer.tick().await;
 
-            let payments = state.db.get_confirming_payments().await.unwrap_or_default();
+            trace!("Scanning for confirming payments...");
+
+            let payments = match state.db.get_confirming_payments().await {
+                Ok(p) => p,
+                Err(e) => {
+                    error!(error = %e, "Failed to fetch confirming payments from DB");
+                    continue;
+                }
+            };
+
+            if !payments.is_empty() {
+                debug!(count = payments.len(), "Processing confirming payments batch");
+            }
 
             for payment in payments {
-                let blockchain = match state.db.get_chain(&payment.network).await {
-                    Ok(Some(bc)) => bc,
-                    Ok(None) => {
-                        eprintln!("Error getting chain {} (not found)", payment.network);
-                        continue;
-                    }
-                    Err(e) => {
-                        eprintln!("Error getting chain {}: {}", payment.network, e);
-                        continue;
-                    }
-                };
+                let verify_span = tracing::info_span!(
+                    "verify_payment",
+                    id = %payment.id,
+                    tx = %payment.tx_hash,
+                    net = %payment.network
+                );
 
-                let (last_processed, required) = {
-                    let chain_config_lock = blockchain.config();
-                    let guard = chain_config_lock.read().unwrap();
-                    (guard.last_processed_block, guard.required_confirmations)
-                };
+                async {
+                    let blockchain = match state.db.get_chain(&payment.network).await {
+                        Ok(Some(bc)) => bc,
+                        Ok(None) => {
+                            error!("Blockchain adapter not found for active payment");
+                            return;
+                        }
+                        Err(e) => {
+                            error!(error = %e, "DB error while fetching chain adapter");
+                            return;
+                        }
+                    };
 
-                if last_processed >= payment.block_number + required {
+                    let (last_processed, required) = {
+                        let chain_config_lock = blockchain.config();
+                        let guard = chain_config_lock.read().unwrap();
+                        (guard.last_processed_block, guard.required_confirmations)
+                    };
+
+                    let target_block = payment.block_number + required;
+
+                    if last_processed < target_block {
+                        trace!(
+                            current = last_processed,
+                            needed = target_block,
+                            confirmations = required,
+                            "Not enough confirmations yet"
+                        );
+                        return;
+                    }
+
+                    debug!("Threshold reached, verifying transaction on-chain...");
+
                     match blockchain.get_tx_block_number(&payment.tx_hash).await {
                         Ok(Some(actual_block)) => {
                             if actual_block != payment.block_number {
-                                println!("tx moved from {} to {}. updating DB...",
-                                         payment.tx_hash, actual_block);
+                                warn!(
+                                    old_block = payment.block_number,
+                                    new_block = actual_block,
+                                    "Transaction moved to a different block (Chain Reorg). \
+                                    Updating DB..."
+                                );
 
-                                if let Err(e) = state.db.update_payment_block(&payment.id, actual_block).await {
-                                    eprintln!("Error updating payment block {}: {}", payment.id, e);
+                                if let Err(e) = state.db.update_payment_block(&payment.id,
+                                                                              actual_block).await {
+                                    error!(error = %e, "Failed to update payment block after reorg");
                                 }
-                                continue
+
+                                return;
                             }
 
-                            println!("payment {} confirmed and verified! finalizing...", payment.tx_hash);
+                            info!(confirmations = required,
+                                "Payment confirmed and verified on-chain. Finalizing...");
+
                             match state.db.finalize_payment(&payment.id).await {
                                 Ok(true) => {
-                                    let invoice = match state.db.get_invoice(&payment.invoice_id).await { 
+                                    info!("Invoice fully paid!");
+
+                                    let invoice = match state.db.get_invoice(
+                                        &payment.invoice_id).await
+                                    {
                                         Ok(Some(invoice)) => invoice,
                                         Ok(None) => {
-                                            eprintln!("Error getting invoice {} (not found)", payment.invoice_id);
-                                            continue;
+                                            error!(inv_id = %payment.invoice_id, "Invoice \
+                                            disappeared from DB before finalization (???)");
+                                            return;
                                         }
                                         Err(e) => {
-                                            eprintln!("Error getting invoice {}: {}", payment.invoice_id, e);
-                                            continue;
+                                            error!(inv_id = %payment.invoice_id, error = %e,
+                                                "DB error getting invoice");
+                                            return;
                                         }
                                     };
-                                    
-                                    if let Err(e) = state.db.add_webhook_job(&payment.invoice_id, &WebhookEvent::InvoicePaid {
+
+                                    let webhook_event = WebhookEvent::InvoicePaid {
                                         invoice_id: payment.invoice_id.clone(),
                                         paid_amount: invoice.paid,
-                                    }).await {
-                                        eprintln!("Error adding webhook job (InvoicePaid) for {}: {}", payment.invoice_id, e);
+                                    };
+
+                                    if let Err(e) = state.db.add_webhook_job(&payment.invoice_id,
+                                                                             &webhook_event).await {
+                                        error!(error = %e, "Failed to add InvoicePaid webhook job");
                                     }
+
+                                    debug!(address = %payment.to, "Removing address from watcher");
+
                                     if let Err(e) = state.db.remove_watch_address(
                                         &payment.network, &payment.to).await
                                     {
-                                        eprintln!("Error deleting watch address {}: {}", payment.id, e);
+                                        error!(error = %e, "Failed to remove address from watcher");
                                     }
                                 }
                                 Ok(false) => {
-                                    if let Err(e) = state.db.add_webhook_job(&payment.invoice_id, &WebhookEvent::TxConfirmed {
+                                    info!("Invoice isn't fully paid");
+
+                                    let webhook_event = WebhookEvent::TxConfirmed {
                                         invoice_id: payment.invoice_id.clone(),
                                         tx_hash: payment.tx_hash,
                                         confirmations: required,
-                                    }).await {
-                                        eprintln!("Error adding webhook job (TxConfirmed) for {}: {}", payment.invoice_id, e);
+                                    };
+
+                                    if let Err(e) = state.db.add_webhook_job(&payment.invoice_id,
+                                                                             &webhook_event).await {
+                                        error!(error = %e, "Failed to add TxConfirmed webhook job");
                                     }
                                 },
-                                Err(e) => eprintln!("Error finalizing payment {}: {}", payment.id, e),
+                                Err(e) => {
+                                    error!(error = %e,
+                                        "CRITICAL: DB error during payment finalization")
+                                },
                             }
                         }
                         Ok(None) => {
-                            println!("cannot find transaction {} in chain (reorged?)", payment.tx_hash);
+                            warn!("Transaction cannot be found in chain (possible deep reorg or \
+                            dropped tx). Waiting...");
                         }
-                        Err(e) => eprintln!("Confirmator error while verifying tx: {}", e),
+                        Err(e) => {
+                            warn!(error = %e, "RPC error while verifying transaction status. Will \
+                            retry.");
+                        },
                     }
-                }
+                }.instrument(verify_span).await;
             }
         }
-    })
+    }.instrument(span))
 }

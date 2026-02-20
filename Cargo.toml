@@ -1,11 +1,12 @@
 [package]
 name = "necko3-core"
-version = "1.0.3"
+version = "1.0.5"
 edition = "2024"
 
 [dependencies]
 tokio = { version = "1.49", features = ["full"] }
 anyhow = "1"
+tracing = "0.1"
 
 url = "2.5"
 
