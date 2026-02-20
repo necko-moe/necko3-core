@@ -86,17 +86,18 @@ impl BlockchainAdapter for EvmBlockchain {
                 continue;
             }
 
-            let address_set: HashSet<Address> = self.chain_config.read().unwrap()
-                .watch_addresses.read().unwrap()
-                .iter()
-                .map(|s| Address::from_str(&s).unwrap_or_default())
-                .collect();
             let (decimals, native_symbol) = {
                 let guard = self.chain_config.read().unwrap();
                 (guard.decimals, guard.native_symbol.clone())
             };
 
             for block_num in (last_block_num + 1)..=current_block_num {
+                let address_set: HashSet<Address> = self.chain_config.read().unwrap()
+                    .watch_addresses.read().unwrap()
+                    .iter()
+                    .map(|s| Address::from_str(&s).unwrap_or_default())
+                    .collect();
+
                 println!("processing block {}...", block_num);
 
                 let (block_json, block_hash): (Value, BlockHash) = loop {
@@ -166,12 +167,12 @@ impl BlockchainAdapter for EvmBlockchain {
 
                 let sender = sender.clone();
                 self.process_logs(block_hash, &address_set, sender).await?;
-            }
 
-            last_block_num = current_block_num;
-            self.chain_config.write().unwrap().last_processed_block = last_block_num;
-            if last_block_num % 10 == 0 { // database won't send killers to my home (I hope)
-                db.update_chain_block(&self.chain_name, last_block_num).await?;
+                last_block_num = current_block_num;
+                self.chain_config.write().unwrap().last_processed_block = last_block_num;
+                if last_block_num % 10 == 0 || last_block_num == current_block_num {
+                    db.update_chain_block(&self.chain_name, last_block_num).await?;
+                }
             }
         }
     }
