@@ -11,7 +11,7 @@ use tracing::{debug, error, info, instrument, warn, Instrument};
 pub fn start_invoice_watcher(state: Arc<AppState>, mut rx: Receiver<PaymentEvent>) -> JoinHandle<()> {
     info!("Starting invoice watcher service");
 
-    let span = tracing::info_span!("invoice_watcher_loop");
+    let span = tracing::info_span!(parent: None, "invoice_watcher_loop");
 
     tokio::spawn(async move {
         debug!("Invoice watcher loop started, waiting for events...");

@@ -12,7 +12,7 @@ use tracing::{debug, error, info, instrument, trace, warn, Instrument};
 pub fn start_confirmator(state: Arc<AppState>, interval: Duration) -> JoinHandle<()> {
     info!(?interval, "Starting payment confirmator service");
 
-    let span = tracing::info_span!("confirmator_svc");
+    let span = tracing::info_span!(parent: None, "confirmator_service");
 
     tokio::spawn(async move {
         let mut interval_timer = tokio::time::interval(interval);

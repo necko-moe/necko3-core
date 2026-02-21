@@ -15,7 +15,7 @@ use tracing::{debug, error, info, instrument, trace, warn, Instrument};
 pub fn start_webhook_dispatcher(state: Arc<AppState>) -> JoinHandle<()> {
     info!("Starting webhook dispatcher service");
 
-    let span = tracing::info_span!("webhook_service");
+    let span = tracing::info_span!(parent: None, "webhook_service");
 
     tokio::spawn(async move {
         let client = Arc::new(Client::new());

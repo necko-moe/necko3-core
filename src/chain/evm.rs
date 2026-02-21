@@ -73,7 +73,7 @@ impl BlockchainAdapter for EvmBlockchain {
         Ok(addr)
     }
 
-    #[instrument(skip(self, db, sender), fields(chain = %self.chain_name), err)]
+    #[instrument(skip(self, db, sender), fields(chain = %self.chain_name, node_type = "EVM"), err)]
     async fn listen(&self, db: Arc<Database>, sender: Sender<PaymentEvent>) -> anyhow::Result<()> {
         info!("Starting blockchain listener loop");
 

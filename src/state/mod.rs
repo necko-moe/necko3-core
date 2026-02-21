@@ -106,7 +106,7 @@ impl AppState {
             let db = self.db.clone();
             let tx = self.tx.clone();
 
-            let span = tracing::info_span!("chain_listener", chain = %chain_name);
+            let span = tracing::info_span!(parent: None, "chain_listener");
 
             let listener = tokio::spawn(async move {
                 if let Err(e) = blockchain.listen(db, tx).await {
@@ -145,7 +145,7 @@ impl AppState {
         let db = self.db.clone();
         let tx = self.tx.clone();
 
-        let span = tracing::info_span!("chain_listener", chain = %chain_name);
+        let span = tracing::info_span!(parent: None, "chain_listener");
 
         let listener = tokio::spawn(async move {
             if let Err(e) = blockchain.listen(db, tx).await {
