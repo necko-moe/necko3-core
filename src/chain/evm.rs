@@ -171,10 +171,6 @@ impl BlockchainAdapter for EvmBlockchain {
                     }
 
                     last_block_num = block_num;
-                    if self.chain_config.read().unwrap().last_processed_block != last_block_num - 1 {
-                        return; // changed externally; do not change the value
-                    }
-
                     self.chain_config.write().unwrap().last_processed_block = last_block_num;
 
                     if last_block_num % 10 == 0 || last_block_num == current_block_num {
