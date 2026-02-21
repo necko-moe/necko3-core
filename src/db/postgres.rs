@@ -345,12 +345,12 @@ impl DatabaseAdapter for Postgres {
             .execute(&self.pool)
             .await?;
 
-        let guard = self.chains_cache.write().unwrap();
+        let mut guard = self.chains_cache.write().unwrap();
         let blockchain = guard.get(chain_name)
             .ok_or_else(|| anyhow::anyhow!("chain '{}' does not exist", chain_name))?;
 
         let config_lock = blockchain.config();
-        let mut chain_config = config_lock.write().unwrap();
+        let mut chain_config = config_lock.read().unwrap().clone();
 
         if let Some(xpub) = &chain_update.xpub {
             chain_config.xpub = xpub.to_owned();
@@ -371,6 +371,10 @@ impl DatabaseAdapter for Postgres {
         if let Some(required_confirmations) = chain_update.required_confirmations {
             chain_config.required_confirmations = required_confirmations;
         }
+
+        let new_blockchain = Arc::new(Blockchain::new(chain_config)?);
+
+        guard.insert(chain_name.to_owned(), new_blockchain);
 
         Ok(())
     }

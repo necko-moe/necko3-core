@@ -260,7 +260,7 @@ impl EvmBlockchain {
                         if is_transfer {
                             suspicious_block = true;
                             trace!(
-                                tx = ?tx["hash"],
+                                tx = %tx["hash"],
                                 contract = %to_addr,
                                 "Found transfer/transferFrom to watched contract. "
                             );
