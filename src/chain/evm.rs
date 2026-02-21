@@ -3,7 +3,7 @@ use crate::db::{Database, DatabaseAdapter};
 use crate::model::TokenConfig;
 use crate::model::{ChainConfig, PaymentEvent};
 use alloy::primitives::utils::format_units;
-use alloy::primitives::{Address, BlockHash, TxHash, B256, U256};
+use alloy::primitives::{Address, BlockNumber, TxHash, B256, U256};
 use alloy::providers::fillers::{BlobGasFiller, ChainIdFiller, FillProvider, GasFiller, JoinFill,
                                 NonceFiller};
 use alloy::providers::{Identity, Provider, ProviderBuilder, RootProvider};
@@ -121,7 +121,7 @@ impl BlockchainAdapter for EvmBlockchain {
                 async {
                     debug!("Processing block...");
 
-                    let (block_json, block_hash): (Value, BlockHash) = loop {
+                    let transactions: Vec<Value> = loop {
                         let bj: Value = match self.provider.raw_request(
                             "eth_getBlockByNumber".into(),
                             (format!("0x{:x}", block_num), true),
@@ -139,39 +139,35 @@ impl BlockchainAdapter for EvmBlockchain {
                             error!(rpc_error = ?bj["error"], "RPC Node returned error inside response");
                         }
 
-                        let block_hash_str = bj["hash"].as_str().unwrap_or_default();
-                        match block_hash_str.parse::<BlockHash>() {
-                            Ok(block_hash) => break (bj, block_hash),
-                            Err(e) => {
-                                error!(error = %e, hash_str = block_hash_str,
-                                    "Failed to parse block hash. Retrying in 1s...");
+                        match bj["transactions"].as_array() {
+                            Some(txs) => break txs.to_owned(),
+                            None => {
+                                error!("Failed to parse transactions. Retrying in 1s...");
+                                // THERE IS NO FUCKING WAY THAT THERE ARE NO TRANSACTIONS
                                 tokio::time::sleep(Duration::from_secs(1)).await;
                                 continue;
                             }
                         }
                     };
 
-                    if let Some(transactions) = block_json["transactions"].as_array() {
-                        let address_set: HashSet<Address> = self.chain_config.read().unwrap()
-                            .watch_addresses.read().unwrap()
-                            .iter()
-                            .map(|s| Address::from_str(&s).unwrap_or_default())
-                            .collect();
+                    let address_set: HashSet<Address> = self.chain_config.read().unwrap()
+                        .watch_addresses.read().unwrap()
+                        .iter()
+                        .map(|s| Address::from_str(&s).unwrap_or_default())
+                        .collect();
 
-                        let tx_sender = sender.clone();
-                        if let Err(e) = self.process_transactions(
-                            &transactions, &address_set, tx_sender,
-                            decimals, &native_symbol, block_num).await
-                        {
-                            error!(error = %e, "Failed to process block transactions");
-                        }
+                    let tx_sender = sender.clone();
+                    if let Err(e) = self.process_transactions(
+                        &transactions, &address_set, tx_sender,
+                        decimals, &native_symbol, block_num).await
+                    {
+                        error!(error = %e, "Failed to process block transactions");
+                    }
 
-                        let logs_sender = sender.clone();
-                        if let Err(e) = self.process_logs(block_hash, &address_set, logs_sender).await {
-                            error!(error = %e, "Failed to process logs for block");
-                        }
-                    } else {
-                        warn!("Block had no transactions array")
+                    let logs_sender = sender.clone();
+                    if let Err(e) = self.process_logs(block_num, &transactions,
+                                                      &address_set, logs_sender).await {
+                        error!(error = %e, "Failed to process logs for block");
                     }
 
                     last_block_num = block_num;
@@ -219,10 +215,11 @@ impl BlockchainAdapter for EvmBlockchain {
 }
 
 impl EvmBlockchain {
-    #[instrument(skip_all, fields(block_hash = %block_hash))]
+    #[instrument(skip_all, fields(block_number = %block_number))]
     async fn process_logs(
         &self,
-        block_hash: B256,
+        block_number: BlockNumber,
+        transactions: &[Value],
         addresses: &HashSet<Address>,
         sender: Sender<PaymentEvent>,
     ) -> anyhow::Result<()> {
@@ -246,23 +243,77 @@ impl EvmBlockchain {
 
         let token_addresses: Vec<Address> = token_map.keys().cloned().collect();
 
+        let mut suspicious_block = false;
+        for tx in transactions {
+            if let Some(to_str) = tx["to"].as_str() {
+                if let Ok(to_addr) = to_str.parse::<Address>() {
+                    if token_map.contains_key(&to_addr) {
+                        let input_data = tx["input"].as_str()
+                            .or_else(|| tx["data"].as_str())
+                            .unwrap_or("");
+
+                        // 0xa9059cbb = transfer(address,uint256)
+                        // 0x23b872dd = transferFrom(address,address,uint256)
+                        let is_transfer = input_data.starts_with("0xa9059cbb") ||
+                            input_data.starts_with("0x23b872dd");
+
+                        if is_transfer {
+                            suspicious_block = true;
+                            trace!(
+                                tx = ?tx["hash"],
+                                contract = %to_addr,
+                                "Found transfer/transferFrom to watched contract. "
+                            );
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+
         let filter = Filter::new()
-            .at_block_hash(block_hash)
+            .from_block(block_number)
+            .to_block(block_number)
             .address(token_addresses)
             .event("Transfer(address,address,uint256)");
 
-        let logs = loop { // DO. NOT. SKIP. LOGS.
+        let mut attempt = 0;
+        let max_retries = 15; // WHERE IS TRANSACTION?????????
+
+        let logs = loop {
             match self.provider.get_logs(&filter).await {
-                Ok(l) => break l,
+                Ok(l) => {
+                    if !l.is_empty() {
+                        break l;
+                    }
+
+                    if suspicious_block && attempt < max_retries {
+                        attempt += 1;
+                        warn!(
+                            attempt,
+                            max_retries,
+                            "SUSPICIOUS: Transaction to contract found, but NO LOGS returned. \
+                            Possibly RPC Lag or Revert. Retrying in 1s..."
+                        );
+                        tokio::time::sleep(Duration::from_secs(1)).await;
+                        continue;
+                    }
+
+                    if suspicious_block && attempt >= max_retries {
+                        debug!("Gave up retrying. Assuming transaction reverted or emitted no events.");
+                    }
+
+                    break l;
+                },
                 Err(e) => {
-                    warn!(error = %e, "Failed to get logs. Retrying in 2s...");
-                    tokio::time::sleep(Duration::from_secs(2)).await;
+                    warn!(error = %e, "Failed to get logs. Retrying in 1s...");
+                    tokio::time::sleep(Duration::from_secs(1)).await;
                 }
             }
         };
 
         if !logs.is_empty() {
-            debug!(count = logs.len(), "Received logs from RPC");
+            debug!(count = logs.len(), "Received non-empty logs from RPC");
         }
 
         for log in logs {
