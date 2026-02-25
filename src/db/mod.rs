@@ -1,6 +1,6 @@
 use crate::db::mock::MockDatabase;
 use crate::db::postgres::Postgres;
-use crate::model::{ChainConfig, TokenConfig, Invoice, InvoiceStatus, PartialChainUpdate, Payment, WebhookEvent, WebhookJob, WebhookStatus};
+use crate::model::{ChainConfig, TokenConfig, Invoice, InvoiceStatus, PartialChainUpdate, Payment, WebhookEvent, WebhookJob, WebhookStatus, PaymentStatus, Webhook};
 use alloy::primitives::U256;
 use std::collections::HashMap;
 use std::future::Future;
@@ -72,21 +72,34 @@ pub trait DatabaseAdapter: Send + Sync {
     fn is_invoice_expired(&self, uuid: &str) -> impl Future<Output = anyhow::Result<Option<bool>>> + Send;
     fn is_invoice_paid(&self, uuid: &str) -> impl Future<Output = anyhow::Result<Option<bool>>> + Send;
     fn is_invoice_pending(&self, uuid: &str) -> impl Future<Output = anyhow::Result<Option<bool>>> + Send;
-    fn remove_invoice(&self, uuid: &str) -> impl Future<Output = anyhow::Result<()>> + Send;
+    fn cancel_invoice(&self, uuid: &str) -> impl Future<Output = anyhow::Result<()>> + Send;
 
     // payments
     fn add_payment_attempt(&self, invoice_id: &str, from: &str, to: &str, tx_hash: &str,
                            amount_raw: U256, block_number: u64, network: &str, log_index: Option<u64>)
         -> impl Future<Output = anyhow::Result<()>> + Send;
-    fn get_confirming_payments(&self) -> impl Future<Output = anyhow::Result<Vec<Payment>>> + Send;
     fn finalize_payment(&self, payment_id: &str) -> impl Future<Output = anyhow::Result<bool>> + Send;
     fn update_payment_block(&self, payment_id: &str, block_num: u64) -> impl Future<Output = anyhow::Result<()>> + Send;
+    fn cancel_payment(&self, payment_id: &str) -> impl Future<Output = anyhow::Result<()>> + Send;
+    fn get_payments(&self) -> impl Future<Output = anyhow::Result<Vec<Payment>>> + Send;
+    fn get_payment(&self, payment_id: &str) -> impl Future<Output = anyhow::Result<Option<Payment>>> + Send;
+    fn get_payments_by_invoice(&self, invoice_id: &str) -> impl Future<Output = anyhow::Result<Vec<Payment>>> + Send;
+    fn get_payments_by_status(&self, status: PaymentStatus) -> impl Future<Output = anyhow::Result<Vec<Payment>>> + Send;
+    fn get_payments_by_network(&self, network_name: &str) -> impl Future<Output = anyhow::Result<Vec<Payment>>> + Send;
+    fn get_payments_by_address(&self, address_to: &str) -> impl Future<Output = anyhow::Result<Vec<Payment>>> + Send;
 
     // webhooks
     fn select_webhooks_job(&self) -> impl Future<Output = anyhow::Result<Vec<WebhookJob>>> + Send;
     fn set_webhook_status(&self, id: &str, status: WebhookStatus) -> impl Future<Output = anyhow::Result<()>> + Send;
     fn schedule_webhook_retry(&self, id: &str, attempts: i32, next_retry_in_secs: f64) -> impl Future<Output = anyhow::Result<()>> + Send;
     fn add_webhook_job(&self, invoice_id: &str, event: &WebhookEvent) -> impl Future<Output = anyhow::Result<()>> + Send;
+    fn get_webhooks(&self) -> impl Future<Output = anyhow::Result<Vec<Webhook>>> + Send;
+    fn cancel_webhook(&self, webhook_id: &str) -> impl Future<Output = anyhow::Result<()>> + Send;
+    fn get_webhook(&self, webhook_id: &str) -> impl Future<Output = anyhow::Result<Option<Webhook>>> + Send;
+    fn get_webhooks_by_invoice(&self, invoice_id: &str) -> impl Future<Output = anyhow::Result<Vec<Webhook>>> + Send;
+    fn get_webhooks_by_status(&self, status: WebhookStatus) -> impl Future<Output = anyhow::Result<Vec<Webhook>>> + Send;
+    fn get_webhooks_by_event_type(&self, event_type: &str) -> impl Future<Output = anyhow::Result<Vec<Webhook>>> + Send;
+    fn get_webhooks_by_url(&self, url: &str) -> impl Future<Output = anyhow::Result<Vec<Webhook>>> + Send;
 
     // other
     fn get_token_decimals(&self, chain_name: &str, token_symbol: &str) -> impl Future<Output = anyhow::Result<Option<u8>>> + Send;
@@ -390,13 +403,6 @@ impl DatabaseAdapter for Database {
         }
     }
 
-    // async fn add_payment(&self, uuid: &str, amount_raw: U256) -> anyhow::Result<(U256, String)> {
-    //     match self {
-    //         Database::Mock(db) => db.add_payment(uuid, amount_raw).await,
-    //         Database::Postgres(db) => db.add_payment(uuid, amount_raw).await,
-    //     }
-    // }
-
     async fn get_pending_invoice_by_address(&self, chain_name: &str, address: &str) -> anyhow::Result<Option<Invoice>> {
         match self {
             Database::Mock(db) => db.get_pending_invoice_by_address(chain_name, address).await,
@@ -432,10 +438,10 @@ impl DatabaseAdapter for Database {
         }
     }
 
-    async fn remove_invoice(&self, uuid: &str) -> anyhow::Result<()> {
+    async fn cancel_invoice(&self, uuid: &str) -> anyhow::Result<()> {
         match self {
-            Database::Mock(db) => db.remove_invoice(uuid).await,
-            Database::Postgres(db) => db.remove_invoice(uuid).await,
+            Database::Mock(db) => db.cancel_invoice(uuid).await,
+            Database::Postgres(db) => db.cancel_invoice(uuid).await,
         }
     }
 
@@ -450,13 +456,6 @@ impl DatabaseAdapter for Database {
         }
     }
 
-    async fn get_confirming_payments(&self) -> anyhow::Result<Vec<Payment>> {
-        match self {
-            Database::Mock(db) => db.get_confirming_payments().await,
-            Database::Postgres(db) => db.get_confirming_payments().await,
-        }
-    }
-
     async fn finalize_payment(&self, payment_id: &str) -> anyhow::Result<bool> {
         match self {
             Database::Mock(db) => db.finalize_payment(payment_id).await,
@@ -468,6 +467,55 @@ impl DatabaseAdapter for Database {
         match self {
             Database::Mock(db) => db.update_payment_block(payment_id, block_num).await,
             Database::Postgres(db) => db.update_payment_block(payment_id, block_num).await,
+        }
+    }
+
+    async fn cancel_payment(&self, payment_id: &str) -> anyhow::Result<()> {
+        match self {
+            Database::Mock(db) => db.cancel_payment(payment_id).await,
+            Database::Postgres(db) => db.cancel_payment(payment_id).await,
+        }
+    }
+
+    async fn get_payments(&self) -> anyhow::Result<Vec<Payment>> {
+        match self {
+            Database::Mock(db) => db.get_payments().await,
+            Database::Postgres(db) => db.get_payments().await,
+        }
+    }
+
+    async fn get_payment(&self, payment_id: &str) -> anyhow::Result<Option<Payment>> {
+        match self {
+            Database::Mock(db) => db.get_payment(payment_id).await,
+            Database::Postgres(db) => db.get_payment(payment_id).await,
+        }
+    }
+
+    async fn get_payments_by_invoice(&self, invoice_id: &str) -> anyhow::Result<Vec<Payment>> {
+        match self {
+            Database::Mock(db) => db.get_payments_by_invoice(invoice_id).await,
+            Database::Postgres(db) => db.get_payments_by_invoice(invoice_id).await,
+        }
+    }
+
+    async fn get_payments_by_status(&self, status: PaymentStatus) -> anyhow::Result<Vec<Payment>> {
+        match self {
+            Database::Mock(db) => db.get_payments_by_status(status).await,
+            Database::Postgres(db) => db.get_payments_by_status(status).await,
+        }
+    }
+
+    async fn get_payments_by_network(&self, network_name: &str) -> anyhow::Result<Vec<Payment>> {
+        match self {
+            Database::Mock(db) => db.get_payments_by_network(network_name).await,
+            Database::Postgres(db) => db.get_payments_by_network(network_name).await,
+        }
+    }
+
+    async fn get_payments_by_address(&self, address_to: &str) -> anyhow::Result<Vec<Payment>> {
+        match self {
+            Database::Mock(db) => db.get_payments_by_address(address_to).await,
+            Database::Postgres(db) => db.get_payments_by_address(address_to).await,
         }
     }
 
@@ -496,6 +544,55 @@ impl DatabaseAdapter for Database {
         match self {
             Database::Mock(db) => db.add_webhook_job(invoice_id, event).await,
             Database::Postgres(db) => db.add_webhook_job(invoice_id, event).await,
+        }
+    }
+
+    async fn get_webhooks(&self) -> anyhow::Result<Vec<Webhook>> {
+        match self {
+            Database::Mock(db) => db.get_webhooks().await,
+            Database::Postgres(db) => db.get_webhooks().await,
+        }
+    }
+
+    async fn cancel_webhook(&self, webhook_id: &str) -> anyhow::Result<()> {
+        match self {
+            Database::Mock(db) => db.cancel_webhook(webhook_id).await,
+            Database::Postgres(db) => db.cancel_webhook(webhook_id).await,
+        }
+    }
+
+    async fn get_webhook(&self, webhook_id: &str) -> anyhow::Result<Option<Webhook>> {
+        match self {
+            Database::Mock(db) => db.get_webhook(webhook_id).await,
+            Database::Postgres(db) => db.get_webhook(webhook_id).await,
+        }
+    }
+
+    async fn get_webhooks_by_invoice(&self, invoice_id: &str) -> anyhow::Result<Vec<Webhook>> {
+        match self {
+            Database::Mock(db) => db.get_webhooks_by_invoice(invoice_id).await,
+            Database::Postgres(db) => db.get_webhooks_by_invoice(invoice_id).await,
+        }
+    }
+
+    async fn get_webhooks_by_status(&self, status: WebhookStatus) -> anyhow::Result<Vec<Webhook>> {
+        match self {
+            Database::Mock(db) => db.get_webhooks_by_status(status).await,
+            Database::Postgres(db) => db.get_webhooks_by_status(status).await,
+        }
+    }
+
+    async fn get_webhooks_by_event_type(&self, event_type: &str) -> anyhow::Result<Vec<Webhook>> {
+        match self {
+            Database::Mock(db) => db.get_webhooks_by_event_type(event_type).await,
+            Database::Postgres(db) => db.get_webhooks_by_event_type(event_type).await,
+        }
+    }
+
+    async fn get_webhooks_by_url(&self, url: &str) -> anyhow::Result<Vec<Webhook>> {
+        match self {
+            Database::Mock(db) => db.get_webhooks_by_url(url).await,
+            Database::Postgres(db) => db.get_webhooks_by_url(url).await,
         }
     }
 

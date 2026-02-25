@@ -1,20 +1,19 @@
-use std::collections::HashSet;
-use std::sync::{Arc, RwLock};
-use chrono::{DateTime, Utc};
 use alloy::primitives::{TxHash, U256};
+use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use sqlx::types::Json;
+use std::collections::HashSet;
+use std::sync::{Arc, RwLock};
 use strum::{AsRefStr, Display, EnumString};
-use utoipa::ToSchema;
 
-#[derive(Debug, Clone, Eq, Hash, PartialEq, Deserialize, Serialize, ToSchema)]
+#[derive(Debug, Clone, Eq, Hash, PartialEq, Deserialize, Serialize)]
 pub struct TokenConfig {
     pub symbol: String,
     pub contract: String,
     pub decimals: u8,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ChainConfig {
     pub name: String,
     pub rpc_url: String,
@@ -26,16 +25,14 @@ pub struct ChainConfig {
     pub block_lag: u8,
     pub required_confirmations: u64,
 
-    #[schema(ignore)]
     #[serde(skip)]
     pub watch_addresses: Arc<RwLock<HashSet<String>>>,
 
-    #[schema(ignore)]
     #[serde(skip)]
     pub tokens: Arc<RwLock<HashSet<TokenConfig>>>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Payment {
     pub id: String,
     pub invoice_id: String,
@@ -43,7 +40,6 @@ pub struct Payment {
     pub to: String,
     pub network: String,
     pub tx_hash: String,
-    #[schema(value_type = String, example = "1000000000000000000")]
     pub amount_raw: U256,
     pub block_number: u64,
     pub log_index: u64,
@@ -51,7 +47,7 @@ pub struct Payment {
     pub created_at: DateTime<Utc>,
 }
 
-#[derive(Debug, Copy, Clone, Serialize, Deserialize, ToSchema,
+#[derive(Debug, Copy, Clone, Serialize, Deserialize,
     Display, EnumString, AsRefStr)]
 #[strum(serialize_all = "UPPERCASE")]
 pub enum ChainType {
@@ -72,33 +68,33 @@ pub struct PaymentEvent {
     pub log_index: Option<u64>,
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, ToSchema,
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq,
     Display, EnumString, AsRefStr)]
 #[strum(serialize_all = "PascalCase")]
 pub enum InvoiceStatus {
     Pending,
     Paid,
     Expired,
+    Cancelled,
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, ToSchema,
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq,
     Display, EnumString, AsRefStr)]
 #[strum(serialize_all = "PascalCase")]
 pub enum PaymentStatus {
     Confirming,
     Confirmed,
+    Cancelled,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, ToSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct Invoice {
     pub id: String,
     pub address_index: u32,
     pub address: String,
     pub amount: String,
-    #[schema(value_type = String, example = "1000000000000000000")]
     pub amount_raw: U256,
     pub paid: String,
-    #[schema(value_type = String, example = "0")]
     pub paid_raw: U256,
     pub token: String,
     pub network: String,
@@ -110,13 +106,26 @@ pub struct Invoice {
     pub status: InvoiceStatus,
 }
 
-#[derive(Debug, Clone, Deserialize, utoipa::ToSchema)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct PartialChainUpdate {
     pub rpc_url: Option<String>,
     pub last_processed_block: Option<u64>,
     pub xpub: Option<String>,
     pub block_lag: Option<u8>,
     pub required_confirmations: Option<u64>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct Webhook {
+    pub id: String,
+    pub invoice_id: String,
+    pub url: String,
+    pub payload: WebhookEvent,
+    pub status: WebhookStatus,
+    pub attempts: u32,
+    pub max_retries: u32,
+    pub next_retry: DateTime<Utc>,
+    pub created_at: DateTime<Utc>,
 }
 
 #[derive(Debug, sqlx::FromRow)]
@@ -129,7 +138,7 @@ pub struct WebhookJob {
     pub max_retries: i32,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, ToSchema,
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq,
     Display, EnumString, AsRefStr)]
 #[serde(tag = "event_type", content = "data", rename_all = "snake_case")]
 pub enum WebhookEvent {
@@ -153,12 +162,13 @@ pub enum WebhookEvent {
     },
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, ToSchema,
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq,
     Display, EnumString, AsRefStr)]
 #[strum(serialize_all = "PascalCase")]
 pub enum WebhookStatus {
     Pending,
     Processing,
     Sent,
-    Failed
+    Failed,
+    Cancelled,
 }

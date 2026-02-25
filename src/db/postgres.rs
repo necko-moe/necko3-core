@@ -1,8 +1,10 @@
 use crate::chain::{Blockchain, BlockchainAdapter};
 use crate::db::DatabaseAdapter;
-use crate::model::{ChainConfig, ChainType, Invoice, InvoiceStatus, PartialChainUpdate, Payment, PaymentStatus, TokenConfig, WebhookEvent, WebhookJob, WebhookStatus};
+use crate::model::{ChainConfig, ChainType, Invoice, InvoiceStatus, PartialChainUpdate, Payment,
+                   PaymentStatus, TokenConfig, Webhook, WebhookEvent, WebhookJob, WebhookStatus};
 use alloy::primitives::utils::format_units;
 use alloy::primitives::U256;
+use serde_json::{json, Value};
 use sqlx::postgres::PgRow;
 use sqlx::types::BigDecimal;
 use sqlx::{PgPool, Row};
@@ -135,6 +137,7 @@ impl Postgres {
             "Pending" => InvoiceStatus::Pending,
             "Paid" => InvoiceStatus::Paid,
             "Expired" => InvoiceStatus::Expired,
+            "Cancelled" => InvoiceStatus::Cancelled,
             _ => anyhow::bail!("Unknown invoice status in DB: {}", status_str),
         };
 
@@ -180,6 +183,7 @@ impl Postgres {
         let status = match status_str.as_str() {
             "Confirming" => PaymentStatus::Confirming,
             "Confirmed" => PaymentStatus::Confirmed,
+            "Cancelled" => PaymentStatus::Cancelled,
             _ => anyhow::bail!("Unknown payment status in DB: {}", status_str),
         };
 
@@ -199,6 +203,43 @@ impl Postgres {
             status,
             created_at: row.get("created_at"),
             log_index: row.get::<i64, _>("log_index") as u64,
+        })
+    }
+
+    fn map_row_to_webhook(
+        row: PgRow
+    ) -> anyhow::Result<Webhook> {
+        let status_str: String = row.get("status");
+        let status = match status_str.as_str() {
+            "Pending" => WebhookStatus::Pending,
+            "Processing" => WebhookStatus::Processing,
+            "Sent" => WebhookStatus::Sent,
+            "Failed" => WebhookStatus::Failed,
+            "Cancelled" => WebhookStatus::Cancelled,
+            _ => anyhow::bail!("Unknown webhook status in DB: {}", status_str),
+        };
+
+        let db_event_type: String = row.get("event_type");
+        let db_payload: Value = row.get("payload");
+
+        let event_json = json!({
+            "event_type": db_event_type,
+            "data": db_payload
+        });
+
+        let payload_enum: WebhookEvent = serde_json::from_value(event_json)
+            .map_err(|e| anyhow::anyhow!("Failed to deserialize webhook payload: {}", e))?;
+
+        Ok(Webhook {
+            id: row.get::<uuid::Uuid, _>("id").to_string(),
+            invoice_id: row.get::<uuid::Uuid, _>("invoice_id").to_string(),
+            url: row.get("url"),
+            payload: payload_enum,
+            status,
+            attempts: row.get::<i32, _>("attempts") as u32,
+            max_retries: row.get::<i32, _>("max_retries") as u32,
+            next_retry: row.get("next_retry"),
+            created_at: row.get("created_at"),
         })
     }
 }
@@ -767,35 +808,6 @@ impl DatabaseAdapter for Postgres {
         Ok(())
     }
 
-    // async fn add_payment(&self, uuid: &str, amount_raw: U256) -> anyhow::Result<(U256, String)> {
-    //     let uuid_parsed = uuid::Uuid::parse_str(&uuid)?;
-    //     let added_amount_bd = BigDecimal::from_str(&amount_raw.to_string())?;
-    //
-    //     let row = sqlx::query(
-    //         r#"UPDATE invoices
-    //                SET paid_raw = paid_raw + $1
-    //                WHERE id = $2
-    //                RETURNING paid_raw::TEXT, decimals"#
-    //     )
-    //         .bind(added_amount_bd)
-    //         .bind(uuid_parsed)
-    //         .fetch_optional(&self.pool)
-    //         .await?;
-    //
-    //     let row = row.ok_or_else(|| anyhow::anyhow!("Invoice {} not found", uuid))?;
-    //
-    //     let new_paid_u256 = {
-    //         let np_bd: String = row.get("paid_raw");
-    //         U256::from_str(&np_bd)
-    //             .context("Failed to parse result paid_raw")?
-    //     };
-    //     let decimals = row.get::<i16, _>("decimals") as u8;
-    //
-    //     let paid_human = format_units(new_paid_u256, decimals)?;
-    //
-    //     Ok((new_paid_u256, paid_human))
-    // }
-
     async fn get_pending_invoice_by_address(&self, chain_name: &str, address: &str)
         -> anyhow::Result<Option<Invoice>>
     {
@@ -877,10 +889,10 @@ impl DatabaseAdapter for Postgres {
         Ok(status.map(|s| s == InvoiceStatus::Pending.to_string()))
     }
 
-    async fn remove_invoice(&self, uuid: &str) -> anyhow::Result<()> {
+    async fn cancel_invoice(&self, uuid: &str) -> anyhow::Result<()> {
         let uuid_parsed = uuid::Uuid::parse_str(&uuid)?;
 
-        sqlx::query("DELETE FROM invoices WHERE id = $1")
+        sqlx::query("UPDATE invoices SET status = 'Cancelled' WHERE id = $1")
             .bind(uuid_parsed)
             .execute(&self.pool)
             .await?;
@@ -913,17 +925,6 @@ impl DatabaseAdapter for Postgres {
             .await?;
 
         Ok(())
-    }
-
-    async fn get_confirming_payments(&self) -> anyhow::Result<Vec<Payment>> {
-        let rows = sqlx::query(
-            r#"SELECT id, invoice_id, "from", "to", network, tx_hash,
-                       amount_raw::TEXT, block_number, status, created_at, log_index
-                   FROM payments WHERE status = 'Confirming'"#)
-            .fetch_all(&self.pool)
-            .await?;
-
-        rows.into_iter().map(Self::map_row_to_payment).collect()
     }
 
     async fn finalize_payment(&self, payment_id: &str) -> anyhow::Result<bool> {
@@ -984,6 +985,93 @@ impl DatabaseAdapter for Postgres {
             .await?;
 
         Ok(())
+    }
+
+    async fn cancel_payment(&self, payment_id: &str) -> anyhow::Result<()> {
+        let uuid_parsed = uuid::Uuid::parse_str(&payment_id)?;
+
+        sqlx::query("UPDATE payments SET status = 'Cancelled' WHERE id = $1")
+            .bind(uuid_parsed)
+            .execute(&self.pool)
+            .await?;
+
+        Ok(())
+    }
+
+    async fn get_payments(&self) -> anyhow::Result<Vec<Payment>> {
+        let rows = sqlx::query(
+            r#"SELECT id, invoice_id, "from", "to", network, tx_hash,
+                       amount_raw::TEXT, block_number, status, created_at, log_index
+                   FROM payments"#)
+            .fetch_all(&self.pool)
+            .await?;
+
+        rows.into_iter().map(Self::map_row_to_payment).collect()
+    }
+
+    async fn get_payment(&self, payment_id: &str) -> anyhow::Result<Option<Payment>> {
+        let uuid_parsed = uuid::Uuid::parse_str(&payment_id)?;
+
+        sqlx::query(
+            r#"SELECT id, invoice_id, "from", "to", network, tx_hash,
+                       amount_raw::TEXT, block_number, status, created_at, log_index
+                   FROM payments WHERE id = $1"#
+        )
+            .bind(uuid_parsed)
+            .fetch_optional(&self.pool)
+            .await?
+            .map(Self::map_row_to_payment)
+            .transpose()
+    }
+
+    async fn get_payments_by_invoice(&self, invoice_id: &str) -> anyhow::Result<Vec<Payment>> {
+        let uuid_parsed = uuid::Uuid::parse_str(&invoice_id)?;
+
+        let rows = sqlx::query(
+            r#"SELECT id, invoice_id, "from", "to", network, tx_hash,
+                       amount_raw::TEXT, block_number, status, created_at, log_index
+                   FROM payments WHERE invoice_id = $1"#)
+            .bind(uuid_parsed)
+            .fetch_all(&self.pool)
+            .await?;
+
+        rows.into_iter().map(Self::map_row_to_payment).collect()
+    }
+
+    async fn get_payments_by_status(&self, status: PaymentStatus) -> anyhow::Result<Vec<Payment>> {
+        let rows = sqlx::query(
+            r#"SELECT id, invoice_id, "from", "to", network, tx_hash,
+                       amount_raw::TEXT, block_number, status, created_at, log_index
+                   FROM payments WHERE status = $1"#)
+            .bind(status.to_string())
+            .fetch_all(&self.pool)
+            .await?;
+
+        rows.into_iter().map(Self::map_row_to_payment).collect()
+    }
+
+    async fn get_payments_by_network(&self, network_name: &str) -> anyhow::Result<Vec<Payment>> {
+        let rows = sqlx::query(
+            r#"SELECT id, invoice_id, "from", "to", network, tx_hash,
+                       amount_raw::TEXT, block_number, status, created_at, log_index
+                   FROM payments WHERE network = $1"#)
+            .bind(network_name)
+            .fetch_all(&self.pool)
+            .await?;
+
+        rows.into_iter().map(Self::map_row_to_payment).collect()
+    }
+
+    async fn get_payments_by_address(&self, address_to: &str) -> anyhow::Result<Vec<Payment>> {
+        let rows = sqlx::query(
+            r#"SELECT id, invoice_id, "from", "to", network, tx_hash,
+                       amount_raw::TEXT, block_number, status, created_at, log_index
+                   FROM payments WHERE "to" = $1"#)
+            .bind(address_to)
+            .fetch_all(&self.pool)
+            .await?;
+
+        rows.into_iter().map(Self::map_row_to_payment).collect()
     }
 
     async fn select_webhooks_job(&self) -> anyhow::Result<Vec<WebhookJob>> {
@@ -1073,6 +1161,81 @@ impl DatabaseAdapter for Postgres {
             .await?;
 
         Ok(())
+    }
+
+    async fn get_webhooks(&self) -> anyhow::Result<Vec<Webhook>> {
+        let rows = sqlx::query(
+            r#"SELECT * FROM webhooks"#)
+            .fetch_all(&self.pool)
+            .await?;
+
+        rows.into_iter().map(Self::map_row_to_webhook).collect()
+    }
+
+    async fn cancel_webhook(&self, webhook_id: &str) -> anyhow::Result<()> {
+        let uuid_parsed = uuid::Uuid::parse_str(&webhook_id)?;
+
+        sqlx::query("UPDATE webhooks SET status = 'Cancelled' WHERE id = $1")
+            .bind(uuid_parsed)
+            .execute(&self.pool)
+            .await?;
+
+        Ok(())
+    }
+
+    async fn get_webhook(&self, webhook_id: &str) -> anyhow::Result<Option<Webhook>> {
+        let uuid_parsed = uuid::Uuid::parse_str(&webhook_id)?;
+
+        sqlx::query(
+            r#"SELECT * FROM webhooks WHERE id = $1"#
+        )
+            .bind(uuid_parsed)
+            .fetch_optional(&self.pool)
+            .await?
+            .map(Self::map_row_to_webhook)
+            .transpose()
+    }
+
+    async fn get_webhooks_by_invoice(&self, invoice_id: &str) -> anyhow::Result<Vec<Webhook>> {
+        let uuid_parsed = uuid::Uuid::parse_str(&invoice_id)?;
+
+        let rows = sqlx::query(
+            r#"SELECT * FROM webhooks WHERE invoice_id = $1"#)
+            .bind(uuid_parsed)
+            .fetch_all(&self.pool)
+            .await?;
+
+        rows.into_iter().map(Self::map_row_to_webhook).collect()
+    }
+
+    async fn get_webhooks_by_status(&self, status: WebhookStatus) -> anyhow::Result<Vec<Webhook>> {
+        let rows = sqlx::query(
+            r#"SELECT * FROM webhooks WHERE status = $1"#)
+            .bind(status.to_string())
+            .fetch_all(&self.pool)
+            .await?;
+
+        rows.into_iter().map(Self::map_row_to_webhook).collect()
+    }
+
+    async fn get_webhooks_by_event_type(&self, event_type: &str) -> anyhow::Result<Vec<Webhook>> {
+        let rows = sqlx::query(
+            r#"SELECT * FROM webhooks WHERE event_type = $1"#)
+            .bind(event_type)
+            .fetch_all(&self.pool)
+            .await?;
+
+        rows.into_iter().map(Self::map_row_to_webhook).collect()
+    }
+
+    async fn get_webhooks_by_url(&self, url: &str) -> anyhow::Result<Vec<Webhook>> {
+        let rows = sqlx::query(
+            r#"SELECT * FROM webhooks WHERE url = $1"#)
+            .bind(url)
+            .fetch_all(&self.pool)
+            .await?;
+
+        rows.into_iter().map(Self::map_row_to_webhook).collect()
     }
 
     async fn get_token_decimals(&self, chain_name: &str, token_symbol: &str) -> anyhow::Result<Option<u8>> {

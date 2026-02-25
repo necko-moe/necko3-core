@@ -1,31 +1,22 @@
 use crate::chain::{Blockchain, BlockchainAdapter};
 use crate::db::DatabaseAdapter;
-use crate::model::{ChainConfig, Invoice, InvoiceStatus, PartialChainUpdate, Payment, PaymentStatus, TokenConfig, WebhookEvent, WebhookJob, WebhookStatus};
+use crate::model::{ChainConfig, Invoice, InvoiceStatus, PartialChainUpdate, Payment,
+                   PaymentStatus, TokenConfig, Webhook, WebhookEvent, WebhookJob, WebhookStatus};
 use alloy::primitives::utils::format_units;
 use alloy::primitives::U256;
+use chrono::Utc;
 use dashmap::DashMap;
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
-use chrono::Utc;
+use uuid::Uuid;
 
 pub struct MockDatabase {
     chains: RwLock<HashMap<String, Arc<Blockchain>>>, // key = chain name
     invoices: DashMap<String, Invoice>, // key = id/uuid
     token_decimals: RwLock<HashMap<String, HashMap<String, u8>>>, // (chain_name, (token_symbol, decimals))
     payments: DashMap<String, Payment>, // key = invoice_id
-    webhooks: DashMap<String, MockWebhook>, // key = id/uuid
-}
-
-struct MockWebhook {
-    id: uuid::Uuid,
-    invoice_id: uuid::Uuid,
-    url: String,
-    payload: WebhookEvent,
-    status: WebhookStatus,
-    attempts: u32,
-    max_retries: u32,
-    next_retry: chrono::DateTime<Utc>,
+    webhooks: DashMap<String, Webhook>, // key = id/uuid
 }
 
 impl MockDatabase {
@@ -41,6 +32,7 @@ impl MockDatabase {
 }
 
 impl DatabaseAdapter for MockDatabase {
+
 
     async fn get_chains_map(&self) -> anyhow::Result<HashMap<String, Arc<Blockchain>>> {
         Ok(self.chains.read().unwrap().clone())
@@ -374,20 +366,6 @@ impl DatabaseAdapter for MockDatabase {
         Ok(())
     }
 
-    // async fn add_payment(&self, uuid: &str, amount_raw: U256) -> anyhow::Result<(U256, String)> {
-    //     let mut inv = match self.invoices.get_mut(uuid) {
-    //         Some(inv) => inv,
-    //         None => anyhow::bail!("invoice '{}' does not exist", uuid),
-    //     };
-    //
-    //     inv.paid_raw += amount_raw;
-    //
-    //     let amount_human = format_units(inv.paid_raw, inv.decimals)?;
-    //     inv.paid = amount_human;
-    //
-    //     Ok((inv.paid_raw, inv.paid.clone()))
-    // }
-
     async fn get_pending_invoice_by_address(&self, chain_name: &str, address: &str) -> anyhow::Result<Option<Invoice>> {
         Ok(self.invoices.iter()
             .map(|x| x.value().clone())
@@ -430,10 +408,8 @@ impl DatabaseAdapter for MockDatabase {
             .map(|inv| inv.status == InvoiceStatus::Pending))
     }
 
-    async fn remove_invoice(&self, uuid: &str) -> anyhow::Result<()> {
-        self.invoices.remove(uuid);
-
-        Ok(())
+    async fn cancel_invoice(&self, uuid: &str) -> anyhow::Result<()> {
+        self.set_invoice_status(uuid, InvoiceStatus::Cancelled).await
     }
 
     async fn add_payment_attempt(&self, invoice_id: &str, from: &str, to: &str, tx_hash: &str,
@@ -466,13 +442,6 @@ impl DatabaseAdapter for MockDatabase {
         });
 
         Ok(())
-    }
-
-    async fn get_confirming_payments(&self) -> anyhow::Result<Vec<Payment>> {
-        Ok(self.payments.iter()
-            .filter(|p| p.status == PaymentStatus::Confirming)
-            .map(|p| p.value().clone())
-            .collect())
     }
 
     async fn finalize_payment(&self, payment_id: &str) -> anyhow::Result<bool> {
@@ -508,6 +477,53 @@ impl DatabaseAdapter for MockDatabase {
         Ok(())
     }
 
+    async fn cancel_payment(&self, payment_id: &str) -> anyhow::Result<()> {
+        match self.payments.get_mut(payment_id) {
+            Some(mut payment) => payment.status = PaymentStatus::Cancelled,
+            None => anyhow::bail!("payment '{}' does not exist", payment_id),
+        }
+
+        Ok(())
+    }
+
+    async fn get_payments(&self) -> anyhow::Result<Vec<Payment>> {
+        Ok(self.payments.iter()
+            .map(|p| p.value().clone())
+            .collect())
+    }
+
+    async fn get_payment(&self, payment_id: &str) -> anyhow::Result<Option<Payment>> {
+        Ok(self.payments.get(payment_id).map(|x| x.value().clone()))
+    }
+
+    async fn get_payments_by_invoice(&self, invoice_id: &str) -> anyhow::Result<Vec<Payment>> {
+        Ok(self.payments.iter()
+            .map(|x| x.value().clone())
+            .filter(|payment| payment.invoice_id == invoice_id)
+            .collect())
+    }
+
+    async fn get_payments_by_status(&self, status: PaymentStatus) -> anyhow::Result<Vec<Payment>> {
+        Ok(self.payments.iter()
+            .map(|x| x.value().clone())
+            .filter(|payment| payment.status == status)
+            .collect())
+    }
+
+    async fn get_payments_by_network(&self, network_name: &str) -> anyhow::Result<Vec<Payment>> {
+        Ok(self.payments.iter()
+            .map(|x| x.value().clone())
+            .filter(|payment| payment.network == network_name)
+            .collect())
+    }
+
+    async fn get_payments_by_address(&self, address_to: &str) -> anyhow::Result<Vec<Payment>> {
+        Ok(self.payments.iter()
+            .map(|x| x.value().clone())
+            .filter(|payment| payment.to == address_to)
+            .collect())
+    }
+
     async fn select_webhooks_job(&self) -> anyhow::Result<Vec<WebhookJob>> {
         let now = Utc::now();
         let mut jobs = Vec::new();
@@ -528,7 +544,7 @@ impl DatabaseAdapter for MockDatabase {
                     .unwrap_or_else(|| "default_secret".to_owned());
 
                 jobs.push(WebhookJob {
-                    id: job.id,
+                    id: Uuid::parse_str(&job.id)?,
                     url: job.url.clone(),
                     secret_key: secret,
                     payload: sqlx::types::Json(job.payload.clone()),
@@ -572,19 +588,67 @@ impl DatabaseAdapter for MockDatabase {
         }
 
         let job_id = uuid::Uuid::new_v4();
-        let job = MockWebhook {
-            id: job_id,
-            invoice_id: inv_id,
+        let job = Webhook {
+            id: job_id.to_string(),
+            invoice_id: inv_id.to_string(),
             url: invoice.webhook_url.clone().unwrap(),
             payload: event.clone(),
             status: WebhookStatus::Pending,
             attempts: 0,
             max_retries: 10,
+            created_at: Utc::now(),
             next_retry: Utc::now(),
         };
 
         self.webhooks.insert(job_id.to_string(), job);
         Ok(())
+    }
+
+    async fn get_webhooks(&self) -> anyhow::Result<Vec<Webhook>> {
+        Ok(self.webhooks.iter()
+            .map(|w| w.value().clone())
+            .collect())
+    }
+
+    async fn cancel_webhook(&self, webhook_id: &str) -> anyhow::Result<()> {
+        match self.webhooks.get_mut(webhook_id) {
+            Some(mut wh) => wh.status = WebhookStatus::Cancelled,
+            None => anyhow::bail!("webhook '{}' does not exist", webhook_id),
+        }
+
+        Ok(())
+    }
+
+    async fn get_webhook(&self, webhook_id: &str) -> anyhow::Result<Option<Webhook>> {
+        Ok(self.webhooks.get(webhook_id).map(|x| x.value().clone()))
+    }
+
+    async fn get_webhooks_by_invoice(&self, invoice_id: &str) -> anyhow::Result<Vec<Webhook>> {
+        Ok(self.webhooks.iter()
+            .map(|x| x.value().clone())
+            .filter(|wh| wh.invoice_id == invoice_id)
+            .collect())
+    }
+
+    async fn get_webhooks_by_status(&self, status: WebhookStatus) -> anyhow::Result<Vec<Webhook>> {
+        Ok(self.webhooks.iter()
+            .map(|x| x.value().clone())
+            .filter(|wh| wh.status == status)
+            .collect())
+    }
+
+    async fn get_webhooks_by_event_type(&self, event_type: &str) -> anyhow::Result<Vec<Webhook>> {
+        Ok(self.webhooks.iter()
+            .map(|x| x.value().clone())
+            .filter(|wh| wh.payload.to_string() == event_type)
+            .collect())
+    }
+
+    async fn get_webhooks_by_url(&self, url: &str) -> anyhow::Result<Vec<Webhook>> {
+        Ok(self.webhooks.iter()
+            .map(|x| x.value().clone())
+            .filter(|wh| wh.url == url)
+            .collect())
     }
 
     async fn get_token_decimals(&self, chain_name: &str, token_symbol: &str) -> anyhow::Result<Option<u8>> {

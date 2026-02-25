@@ -39,7 +39,7 @@ impl AppState {
         (state, rx)
     }
 
-    #[instrument(skip(db, api_key), err)]
+    #[instrument(skip_all, err)]
     pub async fn init(
         db: Database,
         api_key: &str,
