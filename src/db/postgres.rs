@@ -219,15 +219,9 @@ impl Postgres {
             _ => anyhow::bail!("Unknown webhook status in DB: {}", status_str),
         };
 
-        let db_event_type: String = row.get("event_type");
         let db_payload: Value = row.get("payload");
 
-        let event_json = json!({
-            "event_type": db_event_type,
-            "data": db_payload
-        });
-
-        let payload_enum: WebhookEvent = serde_json::from_value(event_json)
+        let payload_enum: WebhookEvent = serde_json::from_value(db_payload)
             .map_err(|e| anyhow::anyhow!("Failed to deserialize webhook payload: {}", e))?;
 
         Ok(Webhook {

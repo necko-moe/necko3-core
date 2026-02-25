@@ -141,6 +141,7 @@ pub struct WebhookJob {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq,
     Display, EnumString, AsRefStr)]
 #[serde(tag = "event_type", content = "data", rename_all = "snake_case")]
+#[strum(serialize_all = "snake_case")]
 pub enum WebhookEvent {
     TxDetected {
         invoice_id: String,
