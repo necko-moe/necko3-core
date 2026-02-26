@@ -39,6 +39,7 @@ pub struct Payment {
     pub from: String,
     pub to: String,
     pub network: String,
+    pub token: String,
     pub tx_hash: String,
     pub amount_raw: U256,
     pub block_number: u64,

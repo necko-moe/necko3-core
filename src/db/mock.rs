@@ -413,7 +413,7 @@ impl DatabaseAdapter for MockDatabase {
     }
 
     async fn add_payment_attempt(&self, invoice_id: &str, from: &str, to: &str, tx_hash: &str,
-                                 amount_raw: U256, block_number: u64, network: &str,
+                                 amount_raw: U256, block_number: u64, network: &str, token: &str,
                                  log_index: Option<u64>) -> anyhow::Result<()> {
         let mut contains = false;
 
@@ -433,6 +433,7 @@ impl DatabaseAdapter for MockDatabase {
             from: from.to_owned(),
             to: to.to_owned(),
             network: network.to_owned(),
+            token: token.to_owned(),
             tx_hash: tx_hash.to_owned(),
             amount_raw,
             block_number,

@@ -1,0 +1,1 @@
+ALTER TABLE "payments" ADD COLUMN "token" VARCHAR(10) NOT NULL DEFAULT '';

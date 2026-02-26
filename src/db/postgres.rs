@@ -4,7 +4,7 @@ use crate::model::{ChainConfig, ChainType, Invoice, InvoiceStatus, PartialChainU
                    PaymentStatus, TokenConfig, Webhook, WebhookEvent, WebhookJob, WebhookStatus};
 use alloy::primitives::utils::format_units;
 use alloy::primitives::U256;
-use serde_json::{json, Value};
+use serde_json::Value;
 use sqlx::postgres::PgRow;
 use sqlx::types::BigDecimal;
 use sqlx::{PgPool, Row};
@@ -197,6 +197,7 @@ impl Postgres {
             from: row.get("from"),
             to: row.get("to"),
             network: row.get("network"),
+            token: row.get("token"),
             tx_hash: row.get("tx_hash"),
             amount_raw,
             block_number: row.get::<i64, _>("block_number") as u64,
@@ -895,15 +896,15 @@ impl DatabaseAdapter for Postgres {
     }
 
     async fn add_payment_attempt(&self, invoice_id: &str, from: &str, to: &str, tx_hash: &str,
-                                 amount_raw: U256, block_number: u64, network: &str,
+                                 amount_raw: U256, block_number: u64, network: &str, token: &str,
                                  log_index: Option<u64>) -> anyhow::Result<()> {
         let invoice_uuid_parsed = uuid::Uuid::parse_str(invoice_id)?;
         let amount_bd = BigDecimal::from_str(&amount_raw.to_string())?;
 
         sqlx::query(
             r#"INSERT INTO payments (invoice_id, "from", "to", network, tx_hash, amount_raw,
-                      block_number, status, log_index)
-                   VALUES ($1, $2, $3, $4, $5, $6, $7, 'Confirming', $8)
+                      block_number, status, log_index, token)
+                   VALUES ($1, $2, $3, $4, $5, $6, $7, 'Confirming', $8, $9)
                    ON CONFLICT (tx_hash, log_index, network)
                    DO UPDATE SET block_number = excluded.block_number"#
         )
@@ -915,6 +916,7 @@ impl DatabaseAdapter for Postgres {
             .bind(amount_bd)
             .bind(block_number as i64)
             .bind(log_index.map(|x| x as i64))
+            .bind(token)
             .execute(&self.pool)
             .await?;
 
@@ -994,7 +996,7 @@ impl DatabaseAdapter for Postgres {
 
     async fn get_payments(&self) -> anyhow::Result<Vec<Payment>> {
         let rows = sqlx::query(
-            r#"SELECT id, invoice_id, "from", "to", network, tx_hash,
+            r#"SELECT id, invoice_id, "from", "to", network, tx_hash, token,
                        amount_raw::TEXT, block_number, status, created_at, log_index
                    FROM payments"#)
             .fetch_all(&self.pool)
@@ -1007,7 +1009,7 @@ impl DatabaseAdapter for Postgres {
         let uuid_parsed = uuid::Uuid::parse_str(&payment_id)?;
 
         sqlx::query(
-            r#"SELECT id, invoice_id, "from", "to", network, tx_hash,
+            r#"SELECT id, invoice_id, "from", "to", network, tx_hash, token,
                        amount_raw::TEXT, block_number, status, created_at, log_index
                    FROM payments WHERE id = $1"#
         )
@@ -1022,7 +1024,7 @@ impl DatabaseAdapter for Postgres {
         let uuid_parsed = uuid::Uuid::parse_str(&invoice_id)?;
 
         let rows = sqlx::query(
-            r#"SELECT id, invoice_id, "from", "to", network, tx_hash,
+            r#"SELECT id, invoice_id, "from", "to", network, tx_hash, token,
                        amount_raw::TEXT, block_number, status, created_at, log_index
                    FROM payments WHERE invoice_id = $1"#)
             .bind(uuid_parsed)
@@ -1034,7 +1036,7 @@ impl DatabaseAdapter for Postgres {
 
     async fn get_payments_by_status(&self, status: PaymentStatus) -> anyhow::Result<Vec<Payment>> {
         let rows = sqlx::query(
-            r#"SELECT id, invoice_id, "from", "to", network, tx_hash,
+            r#"SELECT id, invoice_id, "from", "to", network, tx_hash, token,
                        amount_raw::TEXT, block_number, status, created_at, log_index
                    FROM payments WHERE status = $1"#)
             .bind(status.to_string())
@@ -1046,7 +1048,7 @@ impl DatabaseAdapter for Postgres {
 
     async fn get_payments_by_network(&self, network_name: &str) -> anyhow::Result<Vec<Payment>> {
         let rows = sqlx::query(
-            r#"SELECT id, invoice_id, "from", "to", network, tx_hash,
+            r#"SELECT id, invoice_id, "from", "to", network, tx_hash, token,
                        amount_raw::TEXT, block_number, status, created_at, log_index
                    FROM payments WHERE network = $1"#)
             .bind(network_name)
@@ -1058,7 +1060,7 @@ impl DatabaseAdapter for Postgres {
 
     async fn get_payments_by_address(&self, address_to: &str) -> anyhow::Result<Vec<Payment>> {
         let rows = sqlx::query(
-            r#"SELECT id, invoice_id, "from", "to", network, tx_hash,
+            r#"SELECT id, invoice_id, "from", "to", network, tx_hash, token,
                        amount_raw::TEXT, block_number, status, created_at, log_index
                    FROM payments WHERE "to" = $1"#)
             .bind(address_to)

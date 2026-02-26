@@ -63,6 +63,7 @@ pub fn start_invoice_watcher(state: Arc<AppState>, mut rx: Receiver<PaymentEvent
                     event.amount_raw,
                     event.block_number,
                     &event.network,
+                    &event.token,
                     event.log_index
                 ).await {
                     Ok(_) => {
