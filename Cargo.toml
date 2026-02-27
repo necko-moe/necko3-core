@@ -1,6 +1,6 @@
 [package]
 name = "necko3-core"
-version = "1.0.7"
+version = "1.0.8"
 edition = "2024"
 
 [dependencies]
@@ -16,7 +16,7 @@ coins-bip32 = "0.13"
 serde = { version = "1", features = ["derive"] }
 chrono = { version = "0.4", features = ["serde"] }
 dashmap = "6.1"
-uuid = { version = "1.20", features = ["v4"] }
+uuid = { version = "1.21", features = ["v4"] }
 
 sqlx = { version = "0.8", features = [
     "runtime-tokio", "tls-rustls", "postgres", "uuid", "chrono", "bigdecimal"] }

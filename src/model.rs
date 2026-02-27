@@ -16,7 +16,7 @@ pub struct TokenConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ChainConfig {
     pub name: String,
-    pub rpc_url: String,
+    pub rpc_urls: Vec<String>,
     pub chain_type: ChainType,
     pub xpub: String,
     pub native_symbol: String,
@@ -109,7 +109,7 @@ pub struct Invoice {
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct PartialChainUpdate {
-    pub rpc_url: Option<String>,
+    pub rpc_urls: Option<Vec<String>>,
     pub last_processed_block: Option<u64>,
     pub xpub: Option<String>,
     pub block_lag: Option<u8>,

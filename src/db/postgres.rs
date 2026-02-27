@@ -29,7 +29,7 @@ impl Postgres {
         let mut chain_id_to_name: HashMap<i32, String> = HashMap::new();
 
         for row in sqlx::query(
-            r#"SELECT id, name, rpc_url, chain_type, xpub, native_symbol, decimals,
+            r#"SELECT id, name, rpc_urls, chain_type, xpub, native_symbol, decimals,
        last_processed_block, block_lag, required_confirmations FROM chains"#
         )
             .fetch_all(&pool)
@@ -44,7 +44,7 @@ impl Postgres {
 
             let config = ChainConfig {
                 name: name.clone(),
-                rpc_url: row.get("rpc_url"),
+                rpc_urls: row.get("rpc_urls"),
                 chain_type,
                 xpub: row.get("xpub"),
                 native_symbol: row.get("native_symbol"),
@@ -268,12 +268,12 @@ impl DatabaseAdapter for Postgres {
 
     async fn add_chain(&self, chain_config: &ChainConfig) -> anyhow::Result<()> {
         sqlx::query(
-            r#"INSERT INTO chains (name, rpc_url, chain_type, xpub, native_symbol, decimals,
+            r#"INSERT INTO chains (name, rpc_urls, chain_type, xpub, native_symbol, decimals,
                     last_processed_block, block_lag, required_confirmations)
                     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)"#,
         )
             .bind(&chain_config.name)
-            .bind(&chain_config.rpc_url)
+            .bind(&chain_config.rpc_urls)
             .bind(chain_config.chain_type.to_string())
             .bind(&chain_config.xpub)
             .bind(&chain_config.native_symbol)
@@ -365,14 +365,14 @@ impl DatabaseAdapter for Postgres {
     {
         sqlx::query(
             r#"UPDATE chains SET
-                       rpc_url = COALESCE($1, rpc_url),
+                       rpc_urls = COALESCE($1, rpc_urls),
                        last_processed_block = COALESCE($2, last_processed_block),
                        xpub = COALESCE($3, xpub),
                        block_lag = COALESCE($4, block_lag),
                        required_confirmations = COALESCE($5, required_confirmations)
                    WHERE name = $6"#
         )
-            .bind(chain_update.rpc_url.to_owned())
+            .bind(chain_update.rpc_urls.clone())
             .bind(chain_update.last_processed_block.map(|x| x as i64))
             .bind(chain_update.xpub.to_owned())
             .bind(chain_update.block_lag.map(|x| x as i16))
@@ -392,8 +392,8 @@ impl DatabaseAdapter for Postgres {
             chain_config.xpub = xpub.to_owned();
         }
 
-        if let Some(rpc_url) = &chain_update.rpc_url {
-            chain_config.rpc_url = rpc_url.to_owned();
+        if let Some(rpc_urls) = &chain_update.rpc_urls {
+            chain_config.rpc_urls = rpc_urls.clone();
         }
 
         if let Some(last_processed_block) = chain_update.last_processed_block {
@@ -473,10 +473,10 @@ impl DatabaseAdapter for Postgres {
             .map(|c| c.config().read().unwrap().xpub.clone()))
     }
 
-    async fn get_rpc_url(&self, chain_name: &str) -> anyhow::Result<Option<String>> {
+    async fn get_rpc_urls(&self, chain_name: &str) -> anyhow::Result<Option<Vec<String>>> {
         Ok(self.chains_cache.read().unwrap().get(chain_name)
             .map(|c| c.config().read().unwrap()
-                .rpc_url.clone()))
+                .rpc_urls.clone()))
     }
 
     async fn get_block_lag(&self, chain_name: &str) -> anyhow::Result<Option<u8>> {

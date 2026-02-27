@@ -34,7 +34,7 @@ pub trait DatabaseAdapter: Send + Sync {
     fn add_watch_address(&self, chain_name: &str, address: &str) -> impl Future<Output = anyhow::Result<()>> + Send;
 
     fn get_xpub(&self, chain_name: &str) -> impl Future<Output = anyhow::Result<Option<String>>> + Send;
-    fn get_rpc_url(&self, chain_name: &str) -> impl Future<Output = anyhow::Result<Option<String>>> + Send;
+    fn get_rpc_urls(&self, chain_name: &str) -> impl Future<Output = anyhow::Result<Option<Vec<String>>>> + Send;
     fn get_block_lag(&self, chain_name: &str) -> impl Future<Output = anyhow::Result<Option<u8>>> + Send;
 
     // token
@@ -256,10 +256,10 @@ impl DatabaseAdapter for Database {
         }
     }
 
-    async fn get_rpc_url(&self, chain_name: &str) -> anyhow::Result<Option<String>> {
+    async fn get_rpc_urls(&self, chain_name: &str) -> anyhow::Result<Option<Vec<String>>> {
         match self {
-            Database::Mock(db) => db.get_rpc_url(chain_name).await,
-            Database::Postgres(db) => db.get_rpc_url(chain_name).await,
+            Database::Mock(db) => db.get_rpc_urls(chain_name).await,
+            Database::Postgres(db) => db.get_rpc_urls(chain_name).await,
         }
     }
 
@@ -450,10 +450,10 @@ impl DatabaseAdapter for Database {
                                  log_index: Option<u64>) -> anyhow::Result<()> {
         match self {
             Database::Mock(db) => db.add_payment_attempt(invoice_id, from, to, tx_hash,
-                                                         amount_raw, block_number, network, token, 
+                                                         amount_raw, block_number, network, token,
                                                          log_index).await,
             Database::Postgres(db) => db.add_payment_attempt(invoice_id, from, to, tx_hash,
-                                                             amount_raw, block_number, network, token, 
+                                                             amount_raw, block_number, network, token,
                                                              log_index).await,
         }
     }

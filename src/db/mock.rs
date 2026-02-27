@@ -121,8 +121,8 @@ impl DatabaseAdapter for MockDatabase {
             chain_config.xpub = xpub.to_owned();
         }
 
-        if let Some(rpc_url) = &chain_update.rpc_url {
-            chain_config.rpc_url = rpc_url.to_owned();
+        if let Some(rpc_urls) = &chain_update.rpc_urls {
+            chain_config.rpc_urls = rpc_urls.clone();
         }
 
         if let Some(last_processed_block) = chain_update.last_processed_block {
@@ -202,10 +202,10 @@ impl DatabaseAdapter for MockDatabase {
             .map(|c| c.config().read().unwrap().xpub.clone()))
     }
 
-    async fn get_rpc_url(&self, chain_name: &str) -> anyhow::Result<Option<String>> {
+    async fn get_rpc_urls(&self, chain_name: &str) -> anyhow::Result<Option<Vec<String>>> {
         Ok(self.chains.read().unwrap().get(chain_name)
             .map(|c| c.config().read().unwrap()
-                .rpc_url.clone()))
+                .rpc_urls.clone()))
     }
 
     async fn get_block_lag(&self, chain_name: &str) -> anyhow::Result<Option<u8>> {

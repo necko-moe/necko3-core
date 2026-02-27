@@ -3,7 +3,7 @@ use crate::db::{Database, DatabaseAdapter};
 use crate::model::TokenConfig;
 use crate::model::{ChainConfig, PaymentEvent};
 use alloy::primitives::utils::format_units;
-use alloy::primitives::{Address, BlockNumber, TxHash, B256, U256};
+use alloy::primitives::{Address, BlockNumber, TxHash, U256};
 use alloy::providers::fillers::{BlobGasFiller, ChainIdFiller, FillProvider, GasFiller, JoinFill,
                                 NonceFiller};
 use alloy::providers::{Identity, Provider, ProviderBuilder, RootProvider};
@@ -14,6 +14,7 @@ use serde_json::Value;
 use std::collections::{HashMap, HashSet};
 use std::str::FromStr;
 use std::sync::{Arc, RwLock};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 use tokio::sync::mpsc::Sender;
 use url::Url;
@@ -32,13 +33,15 @@ sol! {
 pub struct EvmBlockchain {
     chain_name: String,
     chain_config: Arc<RwLock<ChainConfig>>,
-    provider: EvmProvider,
+    providers: Vec<EvmProvider>,
+    current_idx: Arc<AtomicUsize>,
 }
 
 impl std::fmt::Debug for EvmBlockchain {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("EvmBlockchain")
             .field("name", &self.chain_name)
+            .field("rpc_nodes_count", &self.providers.len())
             .finish()
     }
 }
@@ -47,13 +50,23 @@ impl BlockchainAdapter for EvmBlockchain {
     #[instrument(skip(chain_config), fields(chain = %chain_config.name))]
     fn new(chain_config: ChainConfig) -> anyhow::Result<Self> {
         debug!("Initializing EVM Blockchain adapter");
-        let rpc_url = Url::parse(&chain_config.rpc_url).unwrap();
-        let provider = ProviderBuilder::new().connect_http(rpc_url);
+        let mut providers = vec![];
+
+        for url in &chain_config.rpc_urls {
+            let rpc_url = Url::parse(url)?;
+            let provider = ProviderBuilder::new().connect_http(rpc_url);
+            providers.push(provider);
+        }
+
+        if providers.is_empty() {
+            anyhow::bail!("No RPC urls provided")
+        }
 
         Ok(Self {
             chain_name: chain_config.name.clone(),
             chain_config: Arc::new(RwLock::new(chain_config)),
-            provider,
+            providers,
+            current_idx: Arc::new(AtomicUsize::new(0)),
         })
     }
 
@@ -81,23 +94,26 @@ impl BlockchainAdapter for EvmBlockchain {
         if last_block_num == 0 {
             debug!("No last processed block found, fetching latest from RPC");
 
-            last_block_num = match self.provider.get_block_number().await {
-                Ok(n) => n,
-                Err(e) => {
-                    warn!(error = %e, "Failed to get latest block number, retrying in 5s...");
-                    tokio::time::sleep(Duration::from_secs(5)).await;
-                    self.provider.get_block_number().await?
+            last_block_num = loop {
+                match self.provider().get_block_number().await {
+                    Ok(n) => break n,
+                    Err(e) => {
+                        warn!(error = %e, "Failed to get latest block number, retrying in 2s...");
+                        self.rotate_provider();
+                        tokio::time::sleep(Duration::from_secs(2)).await;
+                    }
                 }
-            };
+            }
         }
 
         let block_lag = self.chain_config.read().unwrap().block_lag;
 
         loop {
-            let current_block_num = match self.provider.get_block_number().await {
+            let current_block_num = match self.provider().get_block_number().await {
                 Ok(n) => n,
                 Err(e) => {
-                    warn!(error = %e, "failed to get latest block number from RPC. Sleep 2s...");
+                    warn!(error = %e, "Failed to get latest block number from RPC. Sleep 2s...");
+                    self.rotate_provider();
                     tokio::time::sleep(Duration::from_secs(2)).await;
                     continue
                 }
@@ -122,7 +138,7 @@ impl BlockchainAdapter for EvmBlockchain {
                     debug!("Processing block...");
 
                     let transactions: Vec<Value> = loop {
-                        let bj: Value = match self.provider.raw_request(
+                        let bj: Value = match self.provider().raw_request(
                             "eth_getBlockByNumber".into(),
                             (format!("0x{:x}", block_num), true),
                         ).await {
@@ -130,6 +146,7 @@ impl BlockchainAdapter for EvmBlockchain {
                             Err(e) => {
                                 warn!(error = %e,
                                     "RPC Error during getBlockByNumber. Retrying in 1s...");
+                                self.rotate_provider();
                                 tokio::time::sleep(Duration::from_secs(1)).await;
                                 continue;
                             }
@@ -144,6 +161,7 @@ impl BlockchainAdapter for EvmBlockchain {
                             None => {
                                 error!("Failed to parse transactions. Retrying in 1s...");
                                 // THERE IS NO FUCKING WAY THAT THERE ARE NO TRANSACTIONS
+                                self.rotate_provider();
                                 tokio::time::sleep(Duration::from_secs(1)).await;
                                 continue;
                             }
@@ -189,7 +207,7 @@ impl BlockchainAdapter for EvmBlockchain {
         debug!(tx_hash, "Checking transaction receipt");
         let hash = tx_hash.parse::<TxHash>()?;
 
-        match self.provider.get_transaction_receipt(hash).await? {
+        match self.provider().get_transaction_receipt(hash).await? {
             Some(receipt) => {
                 if receipt.status() {
                     Ok(receipt.block_number)
@@ -211,6 +229,17 @@ impl BlockchainAdapter for EvmBlockchain {
 }
 
 impl EvmBlockchain {
+    fn provider(&self) -> &EvmProvider {
+        let idx = self.current_idx.load(Ordering::Relaxed);
+        &self.providers[idx % self.providers.len()]
+    }
+
+    fn rotate_provider(&self) {
+        let old_idx = self.current_idx.fetch_add(1, Ordering::SeqCst);
+        let new_idx = (old_idx + 1) % self.providers.len();
+        warn!(index = new_idx, "Switched to other RPC node");
+    }
+
     #[instrument(skip_all, fields(block_number = %block_number))]
     async fn process_logs(
         &self,
@@ -277,7 +306,7 @@ impl EvmBlockchain {
         let max_retries = 15; // WHERE IS TRANSACTION?????????
 
         let logs = loop {
-            match self.provider.get_logs(&filter).await {
+            match self.provider().get_logs(&filter).await {
                 Ok(l) => {
                     if !l.is_empty() {
                         break l;
@@ -303,6 +332,7 @@ impl EvmBlockchain {
                 },
                 Err(e) => {
                     warn!(error = %e, "Failed to get logs. Retrying in 1s...");
+                    self.rotate_provider();
                     tokio::time::sleep(Duration::from_secs(1)).await;
                 }
             }
