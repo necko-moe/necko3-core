@@ -138,22 +138,38 @@ impl BlockchainAdapter for EvmBlockchain {
                     debug!("Processing block...");
 
                     let transactions: Vec<Value> = loop {
-                        let bj: Value = match self.provider().raw_request(
+                        let request_future = self.provider().raw_request::<_, Value>(
                             "eth_getBlockByNumber".into(),
                             (format!("0x{:x}", block_num), true),
-                        ).await {
-                            Ok(v) => v,
-                            Err(e) => {
+                        );
+
+                        let bj_result = tokio::time::timeout(
+                            Duration::from_secs(10), request_future).await;
+
+                        let bj: Value = match bj_result {
+                            Ok(Ok(v)) => v,
+                            Ok(Err(e)) => {
                                 warn!(error = %e,
                                     "RPC Error during getBlockByNumber. Retrying in 1s...");
                                 self.rotate_provider();
                                 tokio::time::sleep(Duration::from_secs(1)).await;
                                 continue;
                             }
+                            Err(_) => {
+                                warn!("RPC Request timeout after 10s. Swapping node...");
+                                self.rotate_provider();
+                                continue;
+                            }
                         };
 
                         if !bj["error"].is_null() { // actually I don't know if node can return that
                             error!(rpc_error = ?bj["error"], "RPC Node returned error inside response");
+                        }
+
+                        if bj.is_null() {
+                            trace!("Block not found yet (RPC lag). Waiting 1s...");
+                            tokio::time::sleep(Duration::from_secs(1)).await;
+                            continue;
                         }
 
                         match bj["transactions"].as_array() {
@@ -235,8 +251,11 @@ impl EvmBlockchain {
     }
 
     fn rotate_provider(&self) {
+        if self.providers.len() <= 1 { return; }
+
         let old_idx = self.current_idx.fetch_add(1, Ordering::SeqCst);
         let new_idx = (old_idx + 1) % self.providers.len();
+
         warn!(index = new_idx, "Switched to other RPC node");
     }
 
