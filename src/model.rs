@@ -200,7 +200,7 @@ impl<T> PaginatedVec<T> {
     }
 }
 
-#[derive(Default)]
+#[derive(Default, Clone, Debug, Deserialize, Serialize)]
 pub struct InvoiceFilter {
     pub status: Option<InvoiceStatus>,
     pub address: Option<String>,
@@ -210,7 +210,7 @@ pub struct InvoiceFilter {
     pub pagination: Pagination,
 }
 
-#[derive(Default)]
+#[derive(Default, Clone, Debug, Deserialize, Serialize)]
 pub struct PaymentFilter {
     pub invoice_id: Option<String>,
     pub from: Option<String>,
@@ -223,7 +223,7 @@ pub struct PaymentFilter {
     pub pagination: Pagination,
 }
 
-#[derive(Default)]
+#[derive(Default, Clone, Debug, Deserialize, Serialize)]
 pub struct WebhookFilter {
     pub invoice_id: Option<String>,
     /// WebhookEvent::to_string()
