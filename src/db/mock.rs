@@ -1,7 +1,6 @@
 use crate::chain::{Blockchain, BlockchainAdapter};
 use crate::db::DatabaseAdapter;
-use crate::model::{ChainConfig, Invoice, InvoiceStatus, PartialChainUpdate, Payment,
-                   PaymentStatus, TokenConfig, Webhook, WebhookEvent, WebhookJob, WebhookStatus};
+use crate::model::{ChainConfig, Invoice, InvoiceFilter, InvoiceStatus, PaginatedVec, PartialChainUpdate, Payment, PaymentFilter, PaymentStatus, TokenConfig, Webhook, WebhookEvent, WebhookFilter, WebhookJob, WebhookStatus};
 use alloy::primitives::utils::format_units;
 use alloy::primitives::U256;
 use chrono::Utc;
@@ -46,7 +45,7 @@ impl DatabaseAdapter for MockDatabase {
         Ok(self.chains.read().unwrap().get(chain_name).cloned())
     }
 
-    async fn get_chain_by_id(&self, id: u32) -> anyhow::Result<Option<Arc<Blockchain>>> {
+    async fn get_chain_by_id(&self, _id: u32) -> anyhow::Result<Option<Arc<Blockchain>>> {
         unimplemented!("mock database does not have ids")
     }
 
@@ -101,7 +100,7 @@ impl DatabaseAdapter for MockDatabase {
         Ok(())
     }
 
-    async fn remove_chain_by_id(&self, id: u32) -> anyhow::Result<()> {
+    async fn remove_chain_by_id(&self, _id: u32) -> anyhow::Result<()> {
         unimplemented!("mock database does not have ids")
     }
 
@@ -242,7 +241,7 @@ impl DatabaseAdapter for MockDatabase {
         }
     }
 
-    async fn get_token_by_id(&self, chain_name: &str, id: u32) -> anyhow::Result<Option<TokenConfig>> {
+    async fn get_token_by_id(&self, _chain_name: &str, _id: u32) -> anyhow::Result<Option<TokenConfig>> {
         unimplemented!("mock database does not have ids")
     }
 
@@ -273,7 +272,7 @@ impl DatabaseAdapter for MockDatabase {
         Ok(())
     }
 
-    async fn remove_token_by_id(&self, chain_name: &str, id: u32) -> anyhow::Result<()> {
+    async fn remove_token_by_id(&self, _chain_name: &str, _id: u32) -> anyhow::Result<()> {
         unimplemented!("mock database does not have ids")
     }
 
@@ -287,56 +286,45 @@ impl DatabaseAdapter for MockDatabase {
         Ok(())
     }
 
-    async fn get_invoices(&self) -> anyhow::Result<Vec<Invoice>> {
-        Ok(self.invoices.iter()
+    async fn get_invoices(&self, filter: InvoiceFilter) -> anyhow::Result<PaginatedVec<Invoice>> {
+        let mut filtered: Vec<Invoice> = self.invoices.iter()
             .map(|x| x.value().clone())
-            .collect())
-    }
+            .filter(|inv| {
+                let status_match = filter.status.as_ref()
+                    .map_or(true, |x| inv.status == *x);
+                let address_match = filter.address.as_ref()
+                    .map_or(true, |x| inv.address == *x);
+                let network_match = filter.network.as_ref()
+                    .map_or(true, |x| inv.network == *x);
+                let token_match = filter.token.as_ref()
+                    .map_or(true, |x| inv.token == *x);
 
-    async fn get_invoices_by_chain(&self, chain_name: &str) -> anyhow::Result<Vec<Invoice>> {
-        Ok(self.invoices.iter()
-            .map(|x| x.value().clone())
-            .filter(|inv| inv.network == chain_name)
-            .collect())
-    }
+                status_match && address_match && network_match && token_match
+            })
+            .collect();
 
-    async fn get_invoices_by_token(&self, token_symbol: &str) -> anyhow::Result<Vec<Invoice>> {
-        Ok(self.invoices.iter()
-            .map(|x| x.value().clone())
-            .filter(|inv| inv.token == token_symbol)
-            .collect())
-    }
+        let total = filtered.len() as u64;
 
-    async fn get_invoices_by_address(&self, address: &str) -> anyhow::Result<Vec<Invoice>> {
-        Ok(self.invoices.iter()
-            .map(|x| x.value().clone())
-            .filter(|inv| inv.address == address)
-            .collect())
+        // ORDER BY created_at DESC
+        filtered.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+
+        // pagination :)
+        let invoices: Vec<Invoice> = filtered
+            .into_iter()
+            .skip(filter.pagination.offset as usize)
+            .take(filter.pagination.limit as usize)
+            .collect();
+
+        Ok(PaginatedVec::new(
+            invoices,
+            total,
+            filter.pagination.offset,
+            filter.pagination.limit,
+        ))
     }
 
     async fn get_invoice(&self, uuid: &str) -> anyhow::Result<Option<Invoice>> {
         Ok(self.invoices.get(uuid).map(|x| x.value().clone()))
-    }
-
-    async fn get_invoices_by_status(&self, status: InvoiceStatus) -> anyhow::Result<Vec<Invoice>> {
-        Ok(self.invoices.iter()
-            .map(|x| x.value().clone())
-            .filter(|inv| inv.status == status)
-            .collect())
-    }
-
-    async fn get_invoices_by_chain_and_status(&self, chain_name: &str, status: InvoiceStatus) -> anyhow::Result<Vec<Invoice>> {
-        Ok(self.invoices.iter()
-            .map(|x| x.value().clone())
-            .filter(|inv| inv.network == chain_name && inv.status == status)
-            .collect())
-    }
-
-    async fn get_invoices_by_address_and_status(&self, address: &str, status: InvoiceStatus) -> anyhow::Result<Vec<Invoice>> {
-        Ok(self.invoices.iter()
-            .map(|x| x.value().clone())
-            .filter(|inv| inv.address == address && inv.status == status)
-            .collect())
     }
 
     async fn get_busy_indexes(&self, chain_name: &str) -> anyhow::Result<Vec<u32>> {
@@ -487,41 +475,56 @@ impl DatabaseAdapter for MockDatabase {
         Ok(())
     }
 
-    async fn get_payments(&self) -> anyhow::Result<Vec<Payment>> {
-        Ok(self.payments.iter()
+    async fn get_payments(&self, filter: PaymentFilter) -> anyhow::Result<PaginatedVec<Payment>> {
+        let mut filtered: Vec<Payment> = self.payments.iter()
             .map(|p| p.value().clone())
-            .collect())
+            .filter(|p| {
+                let invoice_match = filter.invoice_id.as_ref()
+                    .map_or(true, |x| p.invoice_id == *x);
+                let from_match = filter.from.as_ref()
+                    .map_or(true, |x| p.from == *x);
+                let to_match = filter.to.as_ref()
+                    .map_or(true, |x| p.to == *x);
+                let network_match = filter.network.as_ref()
+                    .map_or(true, |x| p.network == *x);
+                let token_match = filter.token.as_ref()
+                    .map_or(true, |x| p.token == *x);
+                let block_match = filter.block_number.as_ref()
+                    .map_or(true, |x| p.block_number == *x);
+                let status_match = filter.status.as_ref()
+                    .map_or(true, |x| p.status == *x);
+
+                invoice_match && from_match && to_match && network_match && token_match
+                    && block_match && status_match
+            })
+            .collect();
+
+        let total = filtered.len() as u64;
+
+        filtered.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+
+        let payments: Vec<Payment> = filtered
+            .into_iter()
+            .skip(filter.pagination.offset as usize)
+            .take(filter.pagination.limit as usize)
+            .collect();
+
+        Ok(PaginatedVec::new(
+            payments,
+            total,
+            filter.pagination.offset,
+            filter.pagination.limit,
+        ))
     }
 
     async fn get_payment(&self, payment_id: &str) -> anyhow::Result<Option<Payment>> {
         Ok(self.payments.get(payment_id).map(|x| x.value().clone()))
     }
 
-    async fn get_payments_by_invoice(&self, invoice_id: &str) -> anyhow::Result<Vec<Payment>> {
+    async fn get_confirming_payments(&self) -> anyhow::Result<Vec<Payment>> {
         Ok(self.payments.iter()
             .map(|x| x.value().clone())
-            .filter(|payment| payment.invoice_id == invoice_id)
-            .collect())
-    }
-
-    async fn get_payments_by_status(&self, status: PaymentStatus) -> anyhow::Result<Vec<Payment>> {
-        Ok(self.payments.iter()
-            .map(|x| x.value().clone())
-            .filter(|payment| payment.status == status)
-            .collect())
-    }
-
-    async fn get_payments_by_network(&self, network_name: &str) -> anyhow::Result<Vec<Payment>> {
-        Ok(self.payments.iter()
-            .map(|x| x.value().clone())
-            .filter(|payment| payment.network == network_name)
-            .collect())
-    }
-
-    async fn get_payments_by_address(&self, address_to: &str) -> anyhow::Result<Vec<Payment>> {
-        Ok(self.payments.iter()
-            .map(|x| x.value().clone())
-            .filter(|payment| payment.to == address_to)
+            .filter(|payment| payment.status == PaymentStatus::Confirming)
             .collect())
     }
 
@@ -605,10 +608,39 @@ impl DatabaseAdapter for MockDatabase {
         Ok(())
     }
 
-    async fn get_webhooks(&self) -> anyhow::Result<Vec<Webhook>> {
-        Ok(self.webhooks.iter()
+    async fn get_webhooks(&self, filter: WebhookFilter) -> anyhow::Result<PaginatedVec<Webhook>> {
+        let mut filtered: Vec<Webhook> = self.webhooks.iter()
             .map(|w| w.value().clone())
-            .collect())
+            .filter(|wh| {
+                let invoice_match = filter.invoice_id.as_ref()
+                    .map_or(true, |x| wh.invoice_id == *x);
+                let event_type_match = filter.event_type.as_ref()
+                    .map_or(true, |x| wh.payload.to_string() == *x);
+                let url_match = filter.url.as_ref()
+                    .map_or(true, |x| wh.url == *x);
+                let status_match = filter.status.as_ref()
+                    .map_or(true, |x| wh.status == *x);
+
+                invoice_match && event_type_match && url_match && status_match
+            })
+            .collect();
+
+        let total = filtered.len() as u64;
+
+        filtered.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+
+        let webhooks: Vec<Webhook> = filtered
+            .into_iter()
+            .skip(filter.pagination.offset as usize)
+            .take(filter.pagination.limit as usize)
+            .collect();
+
+        Ok(PaginatedVec::new(
+            webhooks,
+            total,
+            filter.pagination.offset,
+            filter.pagination.limit,
+        ))
     }
 
     async fn cancel_webhook(&self, webhook_id: &str) -> anyhow::Result<()> {
@@ -622,34 +654,6 @@ impl DatabaseAdapter for MockDatabase {
 
     async fn get_webhook(&self, webhook_id: &str) -> anyhow::Result<Option<Webhook>> {
         Ok(self.webhooks.get(webhook_id).map(|x| x.value().clone()))
-    }
-
-    async fn get_webhooks_by_invoice(&self, invoice_id: &str) -> anyhow::Result<Vec<Webhook>> {
-        Ok(self.webhooks.iter()
-            .map(|x| x.value().clone())
-            .filter(|wh| wh.invoice_id == invoice_id)
-            .collect())
-    }
-
-    async fn get_webhooks_by_status(&self, status: WebhookStatus) -> anyhow::Result<Vec<Webhook>> {
-        Ok(self.webhooks.iter()
-            .map(|x| x.value().clone())
-            .filter(|wh| wh.status == status)
-            .collect())
-    }
-
-    async fn get_webhooks_by_event_type(&self, event_type: &str) -> anyhow::Result<Vec<Webhook>> {
-        Ok(self.webhooks.iter()
-            .map(|x| x.value().clone())
-            .filter(|wh| wh.payload.to_string() == event_type)
-            .collect())
-    }
-
-    async fn get_webhooks_by_url(&self, url: &str) -> anyhow::Result<Vec<Webhook>> {
-        Ok(self.webhooks.iter()
-            .map(|x| x.value().clone())
-            .filter(|wh| wh.url == url)
-            .collect())
     }
 
     async fn get_token_decimals(&self, chain_name: &str, token_symbol: &str) -> anyhow::Result<Option<u8>> {

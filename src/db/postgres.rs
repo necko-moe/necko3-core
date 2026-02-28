@@ -1,13 +1,12 @@
 use crate::chain::{Blockchain, BlockchainAdapter};
 use crate::db::DatabaseAdapter;
-use crate::model::{ChainConfig, ChainType, Invoice, InvoiceStatus, PartialChainUpdate, Payment,
-                   PaymentStatus, TokenConfig, Webhook, WebhookEvent, WebhookJob, WebhookStatus};
+use crate::model::{ChainConfig, ChainType, Invoice, InvoiceFilter, InvoiceStatus, PaginatedVec, PartialChainUpdate, Payment, PaymentFilter, PaymentStatus, TokenConfig, Webhook, WebhookEvent, WebhookFilter, WebhookJob, WebhookStatus};
 use alloy::primitives::utils::format_units;
 use alloy::primitives::U256;
 use serde_json::Value;
 use sqlx::postgres::PgRow;
 use sqlx::types::BigDecimal;
-use sqlx::{PgPool, Row};
+use sqlx::{PgPool, QueryBuilder, Row};
 use std::collections::{HashMap, HashSet};
 use std::str::FromStr;
 use std::sync::{Arc, RwLock};
@@ -622,59 +621,74 @@ impl DatabaseAdapter for Postgres {
         Ok(())
     }
 
-    async fn get_invoices(&self) -> anyhow::Result<Vec<Invoice>> {
-        let rows = sqlx::query(
+    async fn get_invoices(&self, filter: InvoiceFilter) -> anyhow::Result<PaginatedVec<Invoice>> {
+        fn apply_filters<'a>(builder: &mut QueryBuilder<'a, sqlx::Postgres>, filter: &'a InvoiceFilter) {
+            if let Some(ref status) = filter.status {
+                builder.push(" AND status = ");
+                builder.push_bind(status.to_string());
+            }
+
+            if let Some(ref address) = filter.address {
+                builder.push(" AND address = ");
+                builder.push_bind(address);
+            }
+
+            if let Some(ref network) = filter.network {
+                builder.push(" AND network = ");
+                builder.push_bind(network);
+            }
+
+            if let Some(ref token) = filter.token {
+                builder.push(" AND token = ");
+                builder.push_bind(token);
+            }
+        }
+
+        let mut count_builder: QueryBuilder<sqlx::Postgres> = QueryBuilder::new(
+            "SELECT count(*) FROM invoices WHERE TRUE");
+
+        apply_filters(&mut count_builder, &filter);
+
+        let total: i64 = count_builder
+            .build_query_as::<(i64,)>()
+            .fetch_one(&self.pool)
+            .await?
+            .0;
+
+        let mut data_builder: QueryBuilder<sqlx::Postgres> = QueryBuilder::new(
             r#"SELECT
-                       id, address, address_index, network, token, amount_raw::TEXT, paid_raw::TEXT,
-                       status, decimals, webhook_url, webhook_secret, created_at, expires_at
-                   FROM invoices"#
-        )
+                    id, address, address_index, network, token, amount_raw::TEXT, paid_raw::TEXT,
+                    status, decimals, webhook_url, webhook_secret, created_at, expires_at
+                FROM invoices WHERE TRUE"# // WHERE TRUE so that arguments don't have to think that they can be first
+        );
+
+        apply_filters(&mut data_builder, &filter);
+
+        data_builder.push(" ORDER BY created_at DESC ");
+        data_builder.push(" LIMIT ");
+        data_builder.push_bind(filter.pagination.limit as i64);
+        data_builder.push(" OFFSET ");
+        data_builder.push_bind(filter.pagination.offset as i64);
+
+        let rows = data_builder
+            .build()
             .fetch_all(&self.pool)
             .await?;
 
-        rows.into_iter().map(Self::map_row_to_invoice).collect()
-    }
+        let mut invoices: Vec<Invoice> = vec![];
 
-    async fn get_invoices_by_chain(&self, chain_name: &str) -> anyhow::Result<Vec<Invoice>> {
-        let rows = sqlx::query(
-            r#"SELECT
-                       id, address, address_index, network, token, amount_raw::TEXT, paid_raw::TEXT,
-                       status, decimals, webhook_url, webhook_secret, created_at, expires_at
-                   FROM invoices WHERE network = $1"#
-        )
-            .bind(chain_name)
-            .fetch_all(&self.pool)
-            .await?;
+        for row in rows {
+            let inv = Self::map_row_to_invoice(row)?;
 
-        rows.into_iter().map(Self::map_row_to_invoice).collect()
-    }
+            invoices.push(inv);
+        }
 
-    async fn get_invoices_by_token(&self, token_symbol: &str) -> anyhow::Result<Vec<Invoice>> {
-        let rows = sqlx::query(
-            r#"SELECT
-                       id, address, address_index, network, token, amount_raw::TEXT, paid_raw::TEXT,
-                       status, decimals, webhook_url, webhook_secret, created_at, expires_at
-                   FROM invoices WHERE token = $1"#
-        )
-            .bind(token_symbol)
-            .fetch_all(&self.pool)
-            .await?;
-
-        rows.into_iter().map(Self::map_row_to_invoice).collect()
-    }
-
-    async fn get_invoices_by_address(&self, address: &str) -> anyhow::Result<Vec<Invoice>> {
-        let rows = sqlx::query(
-            r#"SELECT
-                       id, address, address_index, network, token, amount_raw::TEXT, paid_raw::TEXT,
-                       status, decimals, webhook_url, webhook_secret, created_at, expires_at
-                   FROM invoices WHERE address = $1"#
-        )
-            .bind(address)
-            .fetch_all(&self.pool)
-            .await?;
-
-        rows.into_iter().map(Self::map_row_to_invoice).collect()
+        Ok(PaginatedVec::new(
+            invoices,
+            total as u64,
+            filter.pagination.offset,
+            filter.pagination.limit,
+        ))
     }
 
     async fn get_invoice(&self, uuid: &str) -> anyhow::Result<Option<Invoice>> {
@@ -694,54 +708,6 @@ impl DatabaseAdapter for Postgres {
             Some(r) => Ok(Some(Self::map_row_to_invoice(r)?)),
             None => Ok(None)
         }
-    }
-
-    async fn get_invoices_by_status(&self, status: InvoiceStatus) -> anyhow::Result<Vec<Invoice>> {
-        let rows = sqlx::query(
-            r#"SELECT
-                       id, address, address_index, network, token, amount_raw::TEXT, paid_raw::TEXT,
-                       status, decimals, webhook_url, webhook_secret, created_at, expires_at
-                   FROM invoices WHERE status = $1"#
-        )
-            .bind(status.to_string())
-            .fetch_all(&self.pool)
-            .await?;
-
-        rows.into_iter().map(Self::map_row_to_invoice).collect()
-    }
-
-    async fn get_invoices_by_chain_and_status(&self, chain_name: &str, status: InvoiceStatus)
-        -> anyhow::Result<Vec<Invoice>>
-    {
-        let rows = sqlx::query(
-            r#"SELECT
-                       id, address, address_index, network, token, amount_raw::TEXT, paid_raw::TEXT,
-                       status, decimals, webhook_url, webhook_secret, created_at, expires_at
-                   FROM invoices WHERE network = $1 AND status = $2"#
-        )
-            .bind(chain_name)
-            .bind(status.to_string())
-            .fetch_all(&self.pool)
-            .await?;
-
-        rows.into_iter().map(Self::map_row_to_invoice).collect()
-    }
-
-    async fn get_invoices_by_address_and_status(&self, address: &str, status: InvoiceStatus)
-        -> anyhow::Result<Vec<Invoice>>
-    {
-        let rows = sqlx::query(
-            r#"SELECT
-                       id, address, address_index, network, token, amount_raw::TEXT, paid_raw::TEXT,
-                       status, decimals, webhook_url, webhook_secret, created_at, expires_at
-                   FROM invoices WHERE address = $1 AND status = $1"#
-        )
-            .bind(address)
-            .bind(status.to_string())
-            .fetch_all(&self.pool)
-            .await?;
-
-        rows.into_iter().map(Self::map_row_to_invoice).collect()
     }
 
     async fn get_busy_indexes(&self, chain_name: &str) -> anyhow::Result<Vec<u32>> {
@@ -994,15 +960,89 @@ impl DatabaseAdapter for Postgres {
         Ok(())
     }
 
-    async fn get_payments(&self) -> anyhow::Result<Vec<Payment>> {
-        let rows = sqlx::query(
-            r#"SELECT id, invoice_id, "from", "to", network, tx_hash, token,
-                       amount_raw::TEXT, block_number, status, created_at, log_index
-                   FROM payments"#)
+    async fn get_payments(&self, filter: PaymentFilter) -> anyhow::Result<PaginatedVec<Payment>> {
+        fn apply_filters<'a>(builder: &mut QueryBuilder<'a, sqlx::Postgres>, filter: &'a PaymentFilter) {
+            if let Some(ref invoice_id) = filter.invoice_id {
+                builder.push(" AND invoice_id = ");
+                builder.push_bind(invoice_id);
+            }
+
+            if let Some(ref from) = filter.from {
+                builder.push(r#" AND "from" = "#);
+                builder.push_bind(from);
+            }
+
+            if let Some(ref to) = filter.to {
+                builder.push(r#" AND "to" = "#);
+                builder.push_bind(to);
+            }
+
+            if let Some(ref network) = filter.network {
+                builder.push(" AND network = ");
+                builder.push_bind(network);
+            }
+
+            if let Some(ref token) = filter.token {
+                builder.push(" AND token = ");
+                builder.push_bind(token);
+            }
+
+            if let Some(ref block_number) = filter.block_number {
+                builder.push(" AND block_number = ");
+                builder.push_bind(*block_number as i64);
+            }
+
+            if let Some(ref status) = filter.status {
+                builder.push(" AND status = ");
+                builder.push_bind(status.to_string());
+            }
+        }
+
+        let mut count_builder: QueryBuilder<sqlx::Postgres> = QueryBuilder::new(
+            "SELECT count(*) FROM payments WHERE TRUE");
+
+        apply_filters(&mut count_builder, &filter);
+
+        let total: i64 = count_builder
+            .build_query_as::<(i64,)>()
+            .fetch_one(&self.pool)
+            .await?
+            .0;
+
+        let mut data_builder: QueryBuilder<sqlx::Postgres> = QueryBuilder::new(
+            r#"SELECT
+                    id, invoice_id, "from", "to", network, tx_hash, token, amount_raw::TEXT,
+                    block_number, status, created_at, log_index
+                FROM payments WHERE TRUE"#
+        );
+
+        apply_filters(&mut data_builder, &filter);
+
+        data_builder.push(" ORDER BY created_at DESC ");
+        data_builder.push(" LIMIT ");
+        data_builder.push_bind(filter.pagination.limit as i64);
+        data_builder.push(" OFFSET ");
+        data_builder.push_bind(filter.pagination.offset as i64);
+
+        let rows = data_builder
+            .build()
             .fetch_all(&self.pool)
             .await?;
 
-        rows.into_iter().map(Self::map_row_to_payment).collect()
+        let mut payments: Vec<Payment> = vec![];
+
+        for row in rows {
+            let payment = Self::map_row_to_payment(row)?;
+
+            payments.push(payment);
+        }
+
+        Ok(PaginatedVec::new(
+            payments,
+            total as u64,
+            filter.pagination.offset,
+            filter.pagination.limit,
+        ))
     }
 
     async fn get_payment(&self, payment_id: &str) -> anyhow::Result<Option<Payment>> {
@@ -1020,50 +1060,12 @@ impl DatabaseAdapter for Postgres {
             .transpose()
     }
 
-    async fn get_payments_by_invoice(&self, invoice_id: &str) -> anyhow::Result<Vec<Payment>> {
-        let uuid_parsed = uuid::Uuid::parse_str(&invoice_id)?;
-
-        let rows = sqlx::query(
-            r#"SELECT id, invoice_id, "from", "to", network, tx_hash, token,
-                       amount_raw::TEXT, block_number, status, created_at, log_index
-                   FROM payments WHERE invoice_id = $1"#)
-            .bind(uuid_parsed)
-            .fetch_all(&self.pool)
-            .await?;
-
-        rows.into_iter().map(Self::map_row_to_payment).collect()
-    }
-
-    async fn get_payments_by_status(&self, status: PaymentStatus) -> anyhow::Result<Vec<Payment>> {
+    async fn get_confirming_payments(&self) -> anyhow::Result<Vec<Payment>> {
         let rows = sqlx::query(
             r#"SELECT id, invoice_id, "from", "to", network, tx_hash, token,
                        amount_raw::TEXT, block_number, status, created_at, log_index
                    FROM payments WHERE status = $1"#)
-            .bind(status.to_string())
-            .fetch_all(&self.pool)
-            .await?;
-
-        rows.into_iter().map(Self::map_row_to_payment).collect()
-    }
-
-    async fn get_payments_by_network(&self, network_name: &str) -> anyhow::Result<Vec<Payment>> {
-        let rows = sqlx::query(
-            r#"SELECT id, invoice_id, "from", "to", network, tx_hash, token,
-                       amount_raw::TEXT, block_number, status, created_at, log_index
-                   FROM payments WHERE network = $1"#)
-            .bind(network_name)
-            .fetch_all(&self.pool)
-            .await?;
-
-        rows.into_iter().map(Self::map_row_to_payment).collect()
-    }
-
-    async fn get_payments_by_address(&self, address_to: &str) -> anyhow::Result<Vec<Payment>> {
-        let rows = sqlx::query(
-            r#"SELECT id, invoice_id, "from", "to", network, tx_hash, token,
-                       amount_raw::TEXT, block_number, status, created_at, log_index
-                   FROM payments WHERE "to" = $1"#)
-            .bind(address_to)
+            .bind(PaymentStatus::Confirming.to_string())
             .fetch_all(&self.pool)
             .await?;
 
@@ -1159,13 +1161,70 @@ impl DatabaseAdapter for Postgres {
         Ok(())
     }
 
-    async fn get_webhooks(&self) -> anyhow::Result<Vec<Webhook>> {
-        let rows = sqlx::query(
-            r#"SELECT * FROM webhooks"#)
+    async fn get_webhooks(&self, filter: WebhookFilter) -> anyhow::Result<PaginatedVec<Webhook>> {
+        fn apply_filters<'a>(builder: &mut QueryBuilder<'a, sqlx::Postgres>, filter: &'a WebhookFilter) {
+            if let Some(ref invoice_id) = filter.invoice_id {
+                builder.push(" AND invoice_id = ");
+                builder.push_bind(invoice_id);
+            }
+
+            if let Some(ref event_type) = filter.event_type {
+                builder.push(" AND event_type = ");
+                builder.push_bind(event_type);
+            }
+
+            if let Some(ref url) = filter.url {
+                builder.push(" AND url = ");
+                builder.push_bind(url);
+            }
+
+            if let Some(ref status) = filter.status {
+                builder.push(" AND status = ");
+                builder.push_bind(status.to_string());
+            }
+        }
+
+        let mut count_builder: QueryBuilder<sqlx::Postgres> = QueryBuilder::new(
+            "SELECT count(*) FROM webhooks WHERE TRUE");
+
+        apply_filters(&mut count_builder, &filter);
+
+        let total: i64 = count_builder
+            .build_query_as::<(i64,)>()
+            .fetch_one(&self.pool)
+            .await?
+            .0;
+
+        let mut data_builder: QueryBuilder<sqlx::Postgres> = QueryBuilder::new(
+            r#"SELECT * FROM webhooks WHERE TRUE"#);
+
+        apply_filters(&mut data_builder, &filter);
+
+        data_builder.push(" ORDER BY created_at DESC ");
+        data_builder.push(" LIMIT ");
+        data_builder.push_bind(filter.pagination.limit as i64);
+        data_builder.push(" OFFSET ");
+        data_builder.push_bind(filter.pagination.offset as i64);
+
+        let rows = data_builder
+            .build()
             .fetch_all(&self.pool)
             .await?;
 
-        rows.into_iter().map(Self::map_row_to_webhook).collect()
+        let mut webhooks: Vec<Webhook> = vec![];
+
+        for row in rows {
+            let wh = Self::map_row_to_webhook(row)?;
+
+            webhooks.push(wh);
+        }
+
+        Ok(PaginatedVec::new(
+            webhooks,
+            total as u64,
+            filter.pagination.offset,
+            filter.pagination.limit,
+        ))
     }
 
     async fn cancel_webhook(&self, webhook_id: &str) -> anyhow::Result<()> {
@@ -1190,48 +1249,6 @@ impl DatabaseAdapter for Postgres {
             .await?
             .map(Self::map_row_to_webhook)
             .transpose()
-    }
-
-    async fn get_webhooks_by_invoice(&self, invoice_id: &str) -> anyhow::Result<Vec<Webhook>> {
-        let uuid_parsed = uuid::Uuid::parse_str(&invoice_id)?;
-
-        let rows = sqlx::query(
-            r#"SELECT * FROM webhooks WHERE invoice_id = $1"#)
-            .bind(uuid_parsed)
-            .fetch_all(&self.pool)
-            .await?;
-
-        rows.into_iter().map(Self::map_row_to_webhook).collect()
-    }
-
-    async fn get_webhooks_by_status(&self, status: WebhookStatus) -> anyhow::Result<Vec<Webhook>> {
-        let rows = sqlx::query(
-            r#"SELECT * FROM webhooks WHERE status = $1"#)
-            .bind(status.to_string())
-            .fetch_all(&self.pool)
-            .await?;
-
-        rows.into_iter().map(Self::map_row_to_webhook).collect()
-    }
-
-    async fn get_webhooks_by_event_type(&self, event_type: &str) -> anyhow::Result<Vec<Webhook>> {
-        let rows = sqlx::query(
-            r#"SELECT * FROM webhooks WHERE event_type = $1"#)
-            .bind(event_type)
-            .fetch_all(&self.pool)
-            .await?;
-
-        rows.into_iter().map(Self::map_row_to_webhook).collect()
-    }
-
-    async fn get_webhooks_by_url(&self, url: &str) -> anyhow::Result<Vec<Webhook>> {
-        let rows = sqlx::query(
-            r#"SELECT * FROM webhooks WHERE url = $1"#)
-            .bind(url)
-            .fetch_all(&self.pool)
-            .await?;
-
-        rows.into_iter().map(Self::map_row_to_webhook).collect()
     }
 
     async fn get_token_decimals(&self, chain_name: &str, token_symbol: &str) -> anyhow::Result<Option<u8>> {

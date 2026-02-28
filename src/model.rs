@@ -174,3 +174,62 @@ pub enum WebhookStatus {
     Failed,
     Cancelled,
 }
+
+#[derive(Debug, Clone, Copy, Default, Deserialize, Serialize)]
+pub struct Pagination {
+    pub limit: u32,
+    pub offset: u64,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct PaginatedVec<T> {
+    pub items: Vec<T>,
+    pub total: u64,
+    pub offset: u64,
+    pub limit: u32,
+}
+
+impl<T> PaginatedVec<T> {
+    pub fn new(items: Vec<T>, total: u64, offset: u64, limit: u32) -> Self {
+        Self {
+            items,
+            total,
+            offset,
+            limit,
+        }
+    }
+}
+
+#[derive(Default)]
+pub struct InvoiceFilter {
+    pub status: Option<InvoiceStatus>,
+    pub address: Option<String>,
+    pub network: Option<String>,
+    pub token: Option<String>,
+
+    pub pagination: Pagination,
+}
+
+#[derive(Default)]
+pub struct PaymentFilter {
+    pub invoice_id: Option<String>,
+    pub from: Option<String>,
+    pub to: Option<String>,
+    pub network: Option<String>,
+    pub token: Option<String>,
+    pub block_number: Option<u64>,
+    pub status: Option<PaymentStatus>,
+
+    pub pagination: Pagination,
+}
+
+#[derive(Default)]
+pub struct WebhookFilter {
+    pub invoice_id: Option<String>,
+    /// WebhookEvent::to_string()
+    pub event_type: Option<String>,
+    pub url: Option<String>,
+    pub status: Option<WebhookStatus>,
+
+    pub pagination: Pagination,
+}

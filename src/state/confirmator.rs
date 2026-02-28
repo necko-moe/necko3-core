@@ -4,7 +4,7 @@ use tokio::task::JoinHandle;
 use crate::AppState;
 use crate::chain::BlockchainAdapter;
 use crate::db::DatabaseAdapter;
-use crate::model::{PaymentStatus, WebhookEvent};
+use crate::model::WebhookEvent;
 
 use tracing::{debug, error, info, instrument, trace, warn, Instrument};
 
@@ -22,9 +22,7 @@ pub fn start_confirmator(state: Arc<AppState>, interval: Duration) -> JoinHandle
 
             trace!("Scanning for confirming payments...");
 
-            let payments = match state.db.get_payments_by_status(
-                PaymentStatus::Confirming).await
-            {
+            let payments = match state.db.get_confirming_payments().await {
                 Ok(p) => p,
                 Err(e) => {
                     error!(error = %e, "Failed to fetch confirming payments from DB");
