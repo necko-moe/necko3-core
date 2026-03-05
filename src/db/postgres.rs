@@ -374,7 +374,7 @@ impl DatabaseAdapter for Postgres {
                        block_lag = COALESCE($4, block_lag),
                        required_confirmations = COALESCE($5, required_confirmations),
                        active = COALESCE($6, active)
-                   WHERE name = $6"#
+                   WHERE name = $7"#
         )
             .bind(chain_update.rpc_urls.clone())
             .bind(chain_update.last_processed_block.map(|x| x as i64))
