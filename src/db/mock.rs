@@ -610,7 +610,7 @@ impl DatabaseAdapter for MockDatabase {
             payload: event.clone(),
             status: WebhookStatus::Pending,
             attempts: 0,
-            max_retries: 10,
+            max_retries: invoice.webhook_max_retries.unwrap_or(5),
             created_at: Utc::now(),
             next_retry: Utc::now(),
         };

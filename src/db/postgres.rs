@@ -171,6 +171,8 @@ impl Postgres {
             decimals,
             webhook_url: row.get("webhook_url"),
             webhook_secret: row.get("webhook_secret"),
+            webhook_max_retries: row.get::<Option<i32>, _>("webhook_max_retries")
+                .map(|x| x as u32),
             created_at: row.get("created_at"),
             expires_at: row.get("expires_at"),
         })
@@ -671,7 +673,7 @@ impl DatabaseAdapter for Postgres {
         let mut data_builder: QueryBuilder<sqlx::Postgres> = QueryBuilder::new(
             r#"SELECT
                     id, address, address_index, network, token, amount_raw::TEXT, paid_raw::TEXT,
-                    status, decimals, webhook_url, webhook_secret, created_at, expires_at
+                    status, decimals, webhook_url, webhook_secret, webhook_max_retries, created_at, expires_at
                 FROM invoices WHERE TRUE"# // WHERE TRUE so that arguments don't have to think that they can be first
         );
 
@@ -710,7 +712,7 @@ impl DatabaseAdapter for Postgres {
         let row = sqlx::query(
             r#"SELECT
                        id, address, address_index, network, token, amount_raw::TEXT, paid_raw::TEXT,
-                       status, decimals, webhook_url, webhook_secret, created_at, expires_at
+                       status, decimals, webhook_url, webhook_secret, webhook_max_retries, created_at, expires_at
                    FROM invoices WHERE id = $1"#
         )
             .bind(uuid_parsed)
@@ -744,8 +746,8 @@ impl DatabaseAdapter for Postgres {
         sqlx::query(
             r#"INSERT INTO invoices
                    (id, address, address_index, network, token, amount_raw, paid_raw, status,
-                    created_at, expires_at, decimals, webhook_url, webhook_secret)
-                   VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)"#
+                    created_at, expires_at, decimals, webhook_url, webhook_secret, webhook_max_retries)
+                   VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)"#
         )
             .bind(uuid)
             .bind(&invoice.address)
@@ -760,6 +762,7 @@ impl DatabaseAdapter for Postgres {
             .bind(invoice.decimals as i16)
             .bind(&invoice.webhook_url)
             .bind(&invoice.webhook_secret)
+            .bind(invoice.webhook_max_retries.map(|x| x as i32))
             .execute(&self.pool)
             .await?;
 
@@ -788,7 +791,7 @@ impl DatabaseAdapter for Postgres {
         let row = sqlx::query(
             r#"SELECT
                        id, address, address_index, network, token, amount_raw::TEXT, paid_raw::TEXT,
-                       status, decimals, created_at, expires_at, webhook_url, webhook_secret
+                       status, decimals, created_at, expires_at, webhook_url, webhook_secret, webhook_max_retries
                    FROM invoices WHERE network = $1 AND address = $2 AND status = 'Pending'"#
         )
             .bind(chain_name)
@@ -1146,28 +1149,33 @@ impl DatabaseAdapter for Postgres {
     async fn add_webhook_job(&self, invoice_id: &str, event: &WebhookEvent) -> anyhow::Result<()> {
         let uuid_parsed = uuid::Uuid::parse_str(&invoice_id)?;
 
-        let url_opt: Option<String> = sqlx::query_scalar(
-            "SELECT webhook_url FROM invoices WHERE id = $1"
+        let record_opt: Option<(Option<String>, Option<i32>)> = sqlx::query_as(
+            "SELECT webhook_url, webhook_max_retries FROM invoices WHERE id = $1"
         )
             .bind(uuid_parsed)
             .fetch_optional(&self.pool)
             .await?;
 
-        let Some(url) = url_opt else {
+        let Some((url_opt, max_retries_opt)) = record_opt else {
             anyhow::bail!("Invoice {} not found", invoice_id);
+        };
+
+        let Some(url) = url_opt else {
+            anyhow::bail!("URL is not set")
         };
 
         let event_type = event.as_ref();
         let payload = serde_json::to_value(event)?;
 
         sqlx::query(
-            r#"INSERT INTO webhooks (invoice_id, event_type, url, payload)
-                       VALUES ($1, $2, $3, $4)"#
+            r#"INSERT INTO webhooks (invoice_id, event_type, url, payload, max_retries)
+                       VALUES ($1, $2, $3, $4, $5)"#
         )
             .bind(uuid_parsed)
             .bind(event_type)
             .bind(url)
             .bind(payload)
+            .bind(max_retries_opt.unwrap_or(5))
             .execute(&self.pool)
             .await?;
 

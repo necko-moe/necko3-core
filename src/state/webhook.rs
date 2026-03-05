@@ -195,6 +195,7 @@ mod tests {
             decimals: 0,
             webhook_url: Some(mock_server.uri()),
             webhook_secret: Some(secret.to_string()),
+            webhook_max_retries: None,
             created_at: Default::default(),
             expires_at: Default::default(),
             status: InvoiceStatus::Pending,

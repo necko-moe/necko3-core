@@ -1,0 +1,1 @@
+ALTER TABLE invoices ADD COLUMN webhook_max_retries INT;

@@ -103,6 +103,7 @@ pub struct Invoice {
     pub decimals: u8,
     pub webhook_url: Option<String>,
     pub webhook_secret: Option<String>,
+    pub webhook_max_retries: Option<u32>,
     pub created_at: DateTime<Utc>,
     pub expires_at: DateTime<Utc>,
     pub status: InvoiceStatus,
