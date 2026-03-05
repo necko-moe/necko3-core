@@ -28,7 +28,7 @@ impl Postgres {
         let mut chain_id_to_name: HashMap<i32, String> = HashMap::new();
 
         for row in sqlx::query(
-            r#"SELECT id, name, rpc_urls, chain_type, xpub, native_symbol, decimals,
+            r#"SELECT id, active, name, rpc_urls, chain_type, xpub, native_symbol, decimals,
        last_processed_block, block_lag, required_confirmations FROM chains"#
         )
             .fetch_all(&pool)
@@ -43,6 +43,7 @@ impl Postgres {
 
             let config = ChainConfig {
                 name: name.clone(),
+                active: row.get("active"),
                 rpc_urls: row.get("rpc_urls"),
                 chain_type,
                 xpub: row.get("xpub"),
@@ -268,8 +269,8 @@ impl DatabaseAdapter for Postgres {
     async fn add_chain(&self, chain_config: &ChainConfig) -> anyhow::Result<()> {
         sqlx::query(
             r#"INSERT INTO chains (name, rpc_urls, chain_type, xpub, native_symbol, decimals,
-                    last_processed_block, block_lag, required_confirmations)
-                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)"#,
+                    last_processed_block, block_lag, required_confirmations, active)
+                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)"#,
         )
             .bind(&chain_config.name)
             .bind(&chain_config.rpc_urls)
@@ -280,6 +281,7 @@ impl DatabaseAdapter for Postgres {
             .bind(chain_config.last_processed_block as i64)
             .bind(chain_config.block_lag as i16)
             .bind(chain_config.required_confirmations as i64)
+            .bind(chain_config.active)
             .execute(&self.pool)
             .await?;
 
@@ -482,6 +484,17 @@ impl DatabaseAdapter for Postgres {
         Ok(self.chains_cache.read().unwrap().get(chain_name)
             .map(|c| c.config().read().unwrap()
                 .block_lag))
+    }
+
+    async fn set_chain_active(&self, chain_name: &str, active: bool) -> anyhow::Result<()> {
+        match self.chains_cache.read().unwrap().get(chain_name) {
+            Some(c) => {
+                c.config().write().unwrap().active = active;
+            }
+            None => anyhow::bail!("chain '{}' does not exist", chain_name),
+        }
+
+        Ok(())
     }
 
     async fn get_tokens(&self, chain_name: &str) -> anyhow::Result<Option<Vec<TokenConfig>>> {

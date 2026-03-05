@@ -16,6 +16,7 @@ pub struct TokenConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ChainConfig {
     pub name: String,
+    pub active: bool,
     pub rpc_urls: Vec<String>,
     pub chain_type: ChainType,
     pub xpub: String,
@@ -187,6 +188,15 @@ pub struct PaginatedVec<T> {
     pub total: u64,
     pub offset: u64,
     pub limit: u32,
+}
+
+impl<T> IntoIterator for PaginatedVec<T> {
+    type Item = T;
+    type IntoIter = std::vec::IntoIter<Self::Item>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.items.into_iter()
+    }
 }
 
 impl<T> PaginatedVec<T> {

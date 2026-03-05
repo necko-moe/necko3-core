@@ -39,6 +39,8 @@ pub trait DatabaseAdapter: Send + Sync {
     fn get_rpc_urls(&self, chain_name: &str) -> impl Future<Output = anyhow::Result<Option<Vec<String>>>> + Send;
     fn get_block_lag(&self, chain_name: &str) -> impl Future<Output = anyhow::Result<Option<u8>>> + Send;
 
+    fn set_chain_active(&self, chain_name: &str, active: bool) -> impl Future<Output = anyhow::Result<()>> + Send;
+
     // token
     fn get_tokens(&self, chain_name: &str) -> impl Future<Output = anyhow::Result<Option<Vec<TokenConfig>>>> + Send;
     fn get_token_contracts(&self, chain_name: &str) -> impl Future<Output = anyhow::Result<Option<Vec<String>>>> + Send;
@@ -254,6 +256,13 @@ impl DatabaseAdapter for Database {
         match self {
             Database::Mock(db) => db.get_block_lag(chain_name).await,
             Database::Postgres(db) => db.get_block_lag(chain_name).await,
+        }
+    }
+
+    async fn set_chain_active(&self, chain_name: &str, active: bool) -> anyhow::Result<()> {
+        match self {
+            Database::Mock(db) => db.set_chain_active(chain_name, active).await,
+            Database::Postgres(db) => db.set_chain_active(chain_name, active).await,
         }
     }
 

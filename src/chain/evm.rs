@@ -109,6 +109,11 @@ impl BlockchainAdapter for EvmBlockchain {
         let block_lag = self.chain_config.read().unwrap().block_lag;
 
         loop {
+            if !self.chain_config.read().unwrap().active {
+                tokio::time::sleep(Duration::from_secs(3)).await;
+                continue;
+            }
+
             let current_block_num = match self.provider().get_block_number().await {
                 Ok(n) => n,
                 Err(e) => {
