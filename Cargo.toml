@@ -1,6 +1,6 @@
 [package]
 name = "necko3-core"
-version = "1.0.10"
+version = "1.0.12"
 edition = "2024"
 
 [dependencies]

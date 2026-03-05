@@ -372,7 +372,8 @@ impl DatabaseAdapter for Postgres {
                        last_processed_block = COALESCE($2, last_processed_block),
                        xpub = COALESCE($3, xpub),
                        block_lag = COALESCE($4, block_lag),
-                       required_confirmations = COALESCE($5, required_confirmations)
+                       required_confirmations = COALESCE($5, required_confirmations),
+                       active = COALESCE($6, active)
                    WHERE name = $6"#
         )
             .bind(chain_update.rpc_urls.clone())
@@ -380,6 +381,7 @@ impl DatabaseAdapter for Postgres {
             .bind(chain_update.xpub.to_owned())
             .bind(chain_update.block_lag.map(|x| x as i16))
             .bind(chain_update.required_confirmations.map(|x| x as i16))
+            .bind(chain_update.active.clone())
             .bind(chain_name)
             .execute(&self.pool)
             .await?;
@@ -409,6 +411,10 @@ impl DatabaseAdapter for Postgres {
 
         if let Some(required_confirmations) = chain_update.required_confirmations {
             chain_config.required_confirmations = required_confirmations;
+        }
+
+        if let Some(active) = chain_update.active {
+            chain_config.active = active;
         }
 
         let new_blockchain = Arc::new(Blockchain::new(chain_config)?);

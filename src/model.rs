@@ -111,6 +111,7 @@ pub struct Invoice {
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct PartialChainUpdate {
+    pub active: Option<bool>,
     pub rpc_urls: Option<Vec<String>>,
     pub last_processed_block: Option<u64>,
     pub xpub: Option<String>,

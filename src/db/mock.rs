@@ -136,6 +136,10 @@ impl DatabaseAdapter for MockDatabase {
             chain_config.required_confirmations = required_confirmations;
         }
 
+        if let Some(active) = chain_update.active {
+            chain_config.active = active;
+        }
+
         let new_blockchain = Arc::new(Blockchain::new(chain_config)?);
 
         guard.insert(chain_name.to_owned(), new_blockchain);
