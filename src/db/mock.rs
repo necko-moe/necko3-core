@@ -217,6 +217,12 @@ impl DatabaseAdapter for MockDatabase {
                 .block_lag))
     }
 
+    async fn get_required_confirmations(&self, chain_name: &str) -> anyhow::Result<Option<u64>> {
+        Ok(self.chains.read().unwrap().get(chain_name)
+            .map(|c| c.config().read().unwrap()
+                .required_confirmations))
+    }
+
     async fn set_chain_active(&self, chain_name: &str, active: bool) -> anyhow::Result<()> {
         match self.chains.read().unwrap().get(chain_name) {
             Some(c) => {

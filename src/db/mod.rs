@@ -38,6 +38,7 @@ pub trait DatabaseAdapter: Send + Sync {
     fn get_xpub(&self, chain_name: &str) -> impl Future<Output = anyhow::Result<Option<String>>> + Send;
     fn get_rpc_urls(&self, chain_name: &str) -> impl Future<Output = anyhow::Result<Option<Vec<String>>>> + Send;
     fn get_block_lag(&self, chain_name: &str) -> impl Future<Output = anyhow::Result<Option<u8>>> + Send;
+    fn get_required_confirmations(&self, chain_name: &str) -> impl Future<Output = anyhow::Result<Option<u64>>> + Send;
 
     fn set_chain_active(&self, chain_name: &str, active: bool) -> impl Future<Output = anyhow::Result<()>> + Send;
 
@@ -256,6 +257,13 @@ impl DatabaseAdapter for Database {
         match self {
             Database::Mock(db) => db.get_block_lag(chain_name).await,
             Database::Postgres(db) => db.get_block_lag(chain_name).await,
+        }
+    }
+
+    async fn get_required_confirmations(&self, chain_name: &str) -> anyhow::Result<Option<u64>> {
+        match self {
+            Database::Mock(db) => db.get_required_confirmations(chain_name).await,
+            Database::Postgres(db) => db.get_required_confirmations(chain_name).await,
         }
     }
 

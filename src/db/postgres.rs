@@ -494,6 +494,12 @@ impl DatabaseAdapter for Postgres {
                 .block_lag))
     }
 
+    async fn get_required_confirmations(&self, chain_name: &str) -> anyhow::Result<Option<u64>> {
+        Ok(self.chains_cache.read().unwrap().get(chain_name)
+            .map(|c| c.config().read().unwrap()
+                .required_confirmations))
+    }
+
     async fn set_chain_active(&self, chain_name: &str, active: bool) -> anyhow::Result<()> {
         match self.chains_cache.read().unwrap().get(chain_name) {
             Some(c) => {
@@ -983,10 +989,12 @@ impl DatabaseAdapter for Postgres {
     }
 
     async fn get_payments(&self, filter: PaymentFilter) -> anyhow::Result<PaginatedVec<Payment>> {
-        fn apply_filters<'a>(builder: &mut QueryBuilder<'a, sqlx::Postgres>, filter: &'a PaymentFilter) {
+        fn apply_filters<'a>(builder: &mut QueryBuilder<'a, sqlx::Postgres>, filter: &'a PaymentFilter) -> anyhow::Result<()> {
             if let Some(ref invoice_id) = filter.invoice_id {
+                let uuid_parsed = uuid::Uuid::parse_str(&invoice_id)?;
+
                 builder.push(" AND invoice_id = ");
-                builder.push_bind(invoice_id);
+                builder.push_bind(uuid_parsed);
             }
 
             if let Some(ref from) = filter.from {
@@ -1018,12 +1026,14 @@ impl DatabaseAdapter for Postgres {
                 builder.push(" AND status = ");
                 builder.push_bind(status.to_string());
             }
+
+            Ok(())
         }
 
         let mut count_builder: QueryBuilder<sqlx::Postgres> = QueryBuilder::new(
             "SELECT count(*) FROM payments WHERE TRUE");
 
-        apply_filters(&mut count_builder, &filter);
+        apply_filters(&mut count_builder, &filter)?;
 
         let total: i64 = count_builder
             .build_query_as::<(i64,)>()
@@ -1038,7 +1048,7 @@ impl DatabaseAdapter for Postgres {
                 FROM payments WHERE TRUE"#
         );
 
-        apply_filters(&mut data_builder, &filter);
+        apply_filters(&mut data_builder, &filter)?;
 
         data_builder.push(" ORDER BY created_at DESC ");
         data_builder.push(" LIMIT ");
@@ -1189,10 +1199,12 @@ impl DatabaseAdapter for Postgres {
     }
 
     async fn get_webhooks(&self, filter: WebhookFilter) -> anyhow::Result<PaginatedVec<Webhook>> {
-        fn apply_filters<'a>(builder: &mut QueryBuilder<'a, sqlx::Postgres>, filter: &'a WebhookFilter) {
+        fn apply_filters<'a>(builder: &mut QueryBuilder<'a, sqlx::Postgres>, filter: &'a WebhookFilter) -> anyhow::Result<()> {
             if let Some(ref invoice_id) = filter.invoice_id {
+                let uuid_parsed = uuid::Uuid::parse_str(&invoice_id)?;
+
                 builder.push(" AND invoice_id = ");
-                builder.push_bind(invoice_id);
+                builder.push_bind(uuid_parsed);
             }
 
             if let Some(ref event_type) = filter.event_type {
@@ -1209,12 +1221,14 @@ impl DatabaseAdapter for Postgres {
                 builder.push(" AND status = ");
                 builder.push_bind(status.to_string());
             }
+
+            Ok(())
         }
 
         let mut count_builder: QueryBuilder<sqlx::Postgres> = QueryBuilder::new(
             "SELECT count(*) FROM webhooks WHERE TRUE");
 
-        apply_filters(&mut count_builder, &filter);
+        apply_filters(&mut count_builder, &filter)?;
 
         let total: i64 = count_builder
             .build_query_as::<(i64,)>()
@@ -1225,7 +1239,7 @@ impl DatabaseAdapter for Postgres {
         let mut data_builder: QueryBuilder<sqlx::Postgres> = QueryBuilder::new(
             r#"SELECT * FROM webhooks WHERE TRUE"#);
 
-        apply_filters(&mut data_builder, &filter);
+        apply_filters(&mut data_builder, &filter)?;
 
         data_builder.push(" ORDER BY created_at DESC ");
         data_builder.push(" LIMIT ");
