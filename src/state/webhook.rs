@@ -1,3 +1,4 @@
+use hmac::KeyInit;
 use crate::db::{Database, DatabaseAdapter};
 use crate::model::{WebhookJob, WebhookStatus};
 use crate::AppState;
@@ -66,7 +67,7 @@ fn generate_signature(timestamp: &str, secret: &str, body: &str) -> anyhow::Resu
     trace!("Generating HMAC signature");
     let signed_body = format!("{}.{}", timestamp, body);
 
-    let mut mac = Hmac::<Sha256>::new_from_slice(secret.as_bytes())?;
+    let mut mac: Hmac<Sha256> = Hmac::new_from_slice(secret.as_bytes())?;
     mac.update(signed_body.as_bytes());
     let result = mac.finalize();
 
