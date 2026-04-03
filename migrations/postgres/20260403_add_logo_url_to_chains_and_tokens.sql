@@ -1,0 +1,2 @@
+ALTER TABLE chains ADD COLUMN logo_url TEXT;
+ALTER TABLE tokens ADD COLUMN logo_url TEXT;

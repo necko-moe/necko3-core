@@ -2935,7 +2935,7 @@ dependencies = [
 
 [[package]]
 name = "necko3-core"
-version = "1.0.14"
+version = "1.0.15"
 dependencies = [
  "alloy",
  "anyhow",

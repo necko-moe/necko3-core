@@ -11,6 +11,7 @@ pub struct TokenConfig {
     pub symbol: String,
     pub contract: String,
     pub decimals: u8,
+    pub logo_url: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -25,12 +26,25 @@ pub struct ChainConfig {
     pub last_processed_block: u64,
     pub block_lag: u8,
     pub required_confirmations: u64,
+    pub logo_url: Option<String>,
 
     #[serde(skip)]
     pub watch_addresses: Arc<RwLock<HashSet<String>>>,
 
     #[serde(skip)]
     pub tokens: Arc<RwLock<HashSet<TokenConfig>>>,
+}
+
+impl ChainConfig {
+    pub fn patch(&mut self, update: &PartialChainUpdate) {
+        if let Some(x) = &update.rpc_urls { self.rpc_urls = x.to_owned(); }
+        if let Some(x) = update.last_processed_block { self.last_processed_block = x; }
+        if let Some(x) = &update.xpub { self.xpub = x.to_owned(); }
+        if let Some(x) = update.block_lag { self.block_lag = x; }
+        if let Some(x) = update.required_confirmations { self.required_confirmations = x; }
+        if let Some(x) = update.active { self.active = x; }
+        if let Some(x) = &update.logo_url { self.logo_url = Some(x.to_owned()); }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -117,6 +131,7 @@ pub struct PartialChainUpdate {
     pub xpub: Option<String>,
     pub block_lag: Option<u8>,
     pub required_confirmations: Option<u64>,
+    pub logo_url: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]

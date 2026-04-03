@@ -108,39 +108,22 @@ impl DatabaseAdapter for MockDatabase {
         Ok(self.chains.read().unwrap().contains_key(chain_name))
     }
 
-    async fn update_chain_partial(&self, chain_name: &str, chain_update: &PartialChainUpdate) -> anyhow::Result<()> {
+    async fn update_chain_partial(&self, chain_name: &str, chain_update: &PartialChainUpdate)
+                                  -> anyhow::Result<()>
+    {
         let mut guard = self.chains.write().unwrap();
-        let blockchain = guard.get(chain_name)
-            .ok_or_else(|| anyhow::anyhow!("chain '{}' does not exist", chain_name))?;
 
-        let config_lock = blockchain.config();
-        let mut chain_config = config_lock.read().unwrap().clone();
+        let new_blockchain = Arc::new(Blockchain::new({
+            let blockchain = guard.get(chain_name)
+                .ok_or_else(|| anyhow::anyhow!("chain '{}' does not exist", chain_name))?;
 
-        if let Some(xpub) = &chain_update.xpub {
-            chain_config.xpub = xpub.to_owned();
-        }
+            let config_lock = blockchain.config();
+            let mut chain_config = config_lock.read().unwrap().clone();
 
-        if let Some(rpc_urls) = &chain_update.rpc_urls {
-            chain_config.rpc_urls = rpc_urls.clone();
-        }
+            chain_config.patch(chain_update);
 
-        if let Some(last_processed_block) = chain_update.last_processed_block {
-            chain_config.last_processed_block = last_processed_block;
-        }
-
-        if let Some(block_lag) = chain_update.block_lag {
-            chain_config.block_lag = block_lag;
-        }
-
-        if let Some(required_confirmations) = chain_update.required_confirmations {
-            chain_config.required_confirmations = required_confirmations;
-        }
-
-        if let Some(active) = chain_update.active {
-            chain_config.active = active;
-        }
-
-        let new_blockchain = Arc::new(Blockchain::new(chain_config)?);
+            chain_config
+        })?);
 
         guard.insert(chain_name.to_owned(), new_blockchain);
 

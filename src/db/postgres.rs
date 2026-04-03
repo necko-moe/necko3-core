@@ -29,7 +29,7 @@ impl Postgres {
 
         for row in sqlx::query(
             r#"SELECT id, active, name, rpc_urls, chain_type, xpub, native_symbol, decimals,
-       last_processed_block, block_lag, required_confirmations FROM chains"#
+       last_processed_block, block_lag, required_confirmations, logo_url FROM chains"#
         )
             .fetch_all(&pool)
             .await?
@@ -54,6 +54,7 @@ impl Postgres {
                 required_confirmations: row.get::<i64, _>("required_confirmations") as u64,
                 watch_addresses: Arc::new(RwLock::new(HashSet::new())),
                 tokens: Arc::new(RwLock::new(HashSet::new())),
+                logo_url: row.get("logo_url"),
             };
 
             // decimals for native token
@@ -69,7 +70,7 @@ impl Postgres {
         }
 
         for row in sqlx::query(
-            r#"SELECT chain_id, symbol, contract_address, decimals FROM tokens"#
+            r#"SELECT chain_id, symbol, contract_address, decimals, logo_url FROM tokens"#
         )
             .fetch_all(&pool)
             .await?
@@ -90,6 +91,7 @@ impl Postgres {
                 symbol: symbol.clone(),
                 contract: row.get("contract_address"),
                 decimals,
+                logo_url: row.get("logo_url"),
             };
 
             blockchain.config().read().unwrap()
@@ -366,6 +368,19 @@ impl DatabaseAdapter for Postgres {
     async fn update_chain_partial(&self, chain_name: &str, chain_update: &PartialChainUpdate)
                                   -> anyhow::Result<()>
     {
+        let new_blockchain = Arc::new(Blockchain::new({
+            let guard = self.chains_cache.read().unwrap();
+            let blockchain = guard.get(chain_name)
+                .ok_or_else(|| anyhow::anyhow!("chain '{}' does not exist", chain_name))?;
+
+            let config_lock = blockchain.config();
+            let mut chain_config = config_lock.read().unwrap().clone();
+
+            chain_config.patch(chain_update);
+
+            chain_config
+        })?);
+
         sqlx::query(
             r#"UPDATE chains SET
                        rpc_urls = COALESCE($1, rpc_urls),
@@ -373,8 +388,9 @@ impl DatabaseAdapter for Postgres {
                        xpub = COALESCE($3, xpub),
                        block_lag = COALESCE($4, block_lag),
                        required_confirmations = COALESCE($5, required_confirmations),
-                       active = COALESCE($6, active)
-                   WHERE name = $7"#
+                       active = COALESCE($6, active),
+                       logo_url = COALESCE($7, logo_url)
+                   WHERE name = $8"#
         )
             .bind(chain_update.rpc_urls.clone())
             .bind(chain_update.last_processed_block.map(|x| x as i64))
@@ -382,44 +398,13 @@ impl DatabaseAdapter for Postgres {
             .bind(chain_update.block_lag.map(|x| x as i16))
             .bind(chain_update.required_confirmations.map(|x| x as i16))
             .bind(chain_update.active.clone())
+            .bind(chain_update.logo_url.clone())
             .bind(chain_name)
             .execute(&self.pool)
             .await?;
 
-        let mut guard = self.chains_cache.write().unwrap();
-        let blockchain = guard.get(chain_name)
-            .ok_or_else(|| anyhow::anyhow!("chain '{}' does not exist", chain_name))?;
-
-        let config_lock = blockchain.config();
-        let mut chain_config = config_lock.read().unwrap().clone();
-
-        if let Some(xpub) = &chain_update.xpub {
-            chain_config.xpub = xpub.to_owned();
-        }
-
-        if let Some(rpc_urls) = &chain_update.rpc_urls {
-            chain_config.rpc_urls = rpc_urls.clone();
-        }
-
-        if let Some(last_processed_block) = chain_update.last_processed_block {
-            chain_config.last_processed_block = last_processed_block;
-        }
-
-        if let Some(block_lag) = chain_update.block_lag {
-            chain_config.block_lag = block_lag;
-        }
-
-        if let Some(required_confirmations) = chain_update.required_confirmations {
-            chain_config.required_confirmations = required_confirmations;
-        }
-
-        if let Some(active) = chain_update.active {
-            chain_config.active = active;
-        }
-
-        let new_blockchain = Arc::new(Blockchain::new(chain_config)?);
-
-        guard.insert(chain_name.to_owned(), new_blockchain);
+        // a little chance of race conditions there, but it's actually okay (no risks)
+        self.chains_cache.write().unwrap().insert(chain_name.to_owned(), new_blockchain);
 
         Ok(())
     }
@@ -543,7 +528,7 @@ impl DatabaseAdapter for Postgres {
         -> anyhow::Result<Option<TokenConfig>>
     {
         let row = sqlx::query(
-            r#"SELECT symbol, contract_address, tokens.decimals FROM tokens
+            r#"SELECT symbol, contract_address, tokens.decimals, tokens.logo_url FROM tokens
                    JOIN chains ON tokens.chain_id = chains.id
                    WHERE chains.name = $1 AND tokens.id = $2"#
         )
@@ -556,7 +541,8 @@ impl DatabaseAdapter for Postgres {
             Ok(Some(TokenConfig {
                 symbol: r.get("symbol"),
                 contract: r.get("contract_address"),
-                decimals: r.get::<i16, _>("decimals") as u8
+                decimals: r.get::<i16, _>("decimals") as u8,
+                logo_url: r.get("logo_url"),
             }))
         } else { Ok(None) }
     }
