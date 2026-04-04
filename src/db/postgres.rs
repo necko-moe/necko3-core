@@ -273,8 +273,8 @@ impl DatabaseAdapter for Postgres {
     async fn add_chain(&self, chain_config: &ChainConfig) -> anyhow::Result<()> {
         sqlx::query(
             r#"INSERT INTO chains (name, rpc_urls, chain_type, xpub, native_symbol, decimals,
-                    last_processed_block, block_lag, required_confirmations, active)
-                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)"#,
+                    last_processed_block, block_lag, required_confirmations, active, logo_url)
+                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)"#,
         )
             .bind(&chain_config.name)
             .bind(&chain_config.rpc_urls)
@@ -286,6 +286,7 @@ impl DatabaseAdapter for Postgres {
             .bind(chain_config.block_lag as i16)
             .bind(chain_config.required_confirmations as i64)
             .bind(chain_config.active)
+            .bind(&chain_config.logo_url)
             .execute(&self.pool)
             .await?;
 
@@ -615,13 +616,14 @@ impl DatabaseAdapter for Postgres {
             .map_err(|_| anyhow::anyhow!("Chain {} not found in DB", chain_name))?;
 
         sqlx::query(
-            r#"INSERT INTO tokens (chain_id, symbol, contract_address, decimals)
-                   VALUES ($1, $2, $3, $4)"#
+            r#"INSERT INTO tokens (chain_id, symbol, contract_address, decimals, logo_url)
+                   VALUES ($1, $2, $3, $4, $5)"#
         )
             .bind(chain_id)
             .bind(&token_config.symbol)
             .bind(&token_config.contract)
             .bind(token_config.decimals as i16)
+            .bind(&token_config.logo_url)
             .execute(&self.pool)
             .await?;
 
