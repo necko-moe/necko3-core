@@ -7,7 +7,7 @@ use alloy::primitives::{Address, BlockNumber, TxHash, U256};
 use alloy::providers::fillers::{BlobGasFiller, ChainIdFiller, FillProvider, GasFiller, JoinFill,
                                 NonceFiller};
 use alloy::providers::{Identity, Provider, ProviderBuilder, RootProvider};
-use alloy::rpc::types::Filter;
+use alloy::rpc::types::{Filter, Topic};
 use alloy::sol;
 use coins_bip32::prelude::{Parent, XPub};
 use serde_json::Value;
@@ -16,6 +16,7 @@ use std::str::FromStr;
 use std::sync::{Arc, RwLock};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
+use alloy::sol_types::SolEvent;
 use tokio::sync::mpsc::Sender;
 use url::Url;
 
@@ -272,6 +273,18 @@ impl EvmBlockchain {
         addresses: &HashSet<Address>,
         sender: Sender<PaymentEvent>,
     ) -> anyhow::Result<()> {
+        trace!(count = transactions.len(), "Received transactions for block {}", block_number);
+
+        if !transactions.is_empty() {
+            let sample = &transactions[0];
+            trace!(
+                tx_type = ?sample["type"],
+                has_to = sample["to"].is_string(),
+                has_input = sample.get("input").or_else(|| sample.get("data")).is_some(),
+                "First tx structure sample"
+            );
+        }
+
         let token_map: HashMap<Address, TokenConfig> = {
             let guard = self.chain_config.read().unwrap();
             let tokens = guard.tokens.read().unwrap();
@@ -324,7 +337,7 @@ impl EvmBlockchain {
             .from_block(block_number)
             .to_block(block_number)
             .address(token_addresses)
-            .event("Transfer(address,address,uint256)");
+            .event_signature(Transfer::SIGNATURE_HASH);
 
         let mut attempt = 0;
         let max_retries = 15; // WHERE IS TRANSACTION?????????
