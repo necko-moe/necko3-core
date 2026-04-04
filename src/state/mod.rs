@@ -125,7 +125,8 @@ impl AppState {
         info!("Trying to start listener for a specific chain");
 
         if self.active_chains.read().await.contains_key(chain) {
-            anyhow::bail!("Chain {} is already listening", chain);
+            warn!(chain_name = chain, "Chain is already listening");
+            return Ok(())
         }
 
         let maybe_blockchain = match self.db.get_chain(chain).await {
@@ -169,7 +170,7 @@ impl AppState {
             handle.abort();
             debug!("Task handle aborted successfully");
         } else {
-            anyhow::bail!("Chain {} is not listening", chain_name);
+            warn!(chain_name, "Chain is not listening");
         }
 
         Ok(())
