@@ -73,6 +73,14 @@ flowchart TB
 5. **Janitor** sweeps expired invoices on a timer, removes their watch addresses, and queues `InvoiceExpired` webhooks.
 6. **Webhook Dispatcher** pulls pending jobs from the database and POSTs them with an `X-Webhook-Signature` (HMAC-SHA256) header. Failed deliveries are retried with exponential backoff up to a configurable max.
 
+<div align="center">
+    <details>
+        <summary><i>screaming at your webhook endpoint until it responds with a 200:</i></summary>
+        <img src=".github/static/webhook-dispatcher.png" width="263" alt="lion screaming at apple meme"/>
+    </details>
+</div>
+
+
 ## Modules
 
 
