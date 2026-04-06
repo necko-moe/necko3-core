@@ -538,38 +538,38 @@ pub struct Pagination {
 
 ## Summary Matrix
 
-| ID | Severity | Module | Description |
-|----|----------|--------|-------------|
-| C-01 | CRITICAL | `db/postgres` | SQL typo `&1` in `remove_token_by_id` |
-| C-02 | CRITICAL | `db/postgres` | `finalize_payment` ignores invoice status |
-| C-03 | CRITICAL | `db/postgres` | `set_chain_active` not persisted to DB |
-| C-04 | CRITICAL | `db/postgres` | `required_confirmations` truncated u64->i16 |
-| C-05 | CRITICAL | all | `RwLock::unwrap()` cascading panic on poison |
-| S-01 | SECURITY | `db/postgres`, `db/mock` | Hardcoded `'default_secret'` fallback |
-| S-02 | SECURITY | `state/webhook` | No SSRF protection on webhook URLs |
-| S-03 | SECURITY | `state/mod` | API key in plain String |
-| S-04 | SECURITY | `db/postgres`, `db/mock` | No input validation |
-| S-05 | SECURITY | `db/postgres` | Webhook secret exposed in API responses |
-| B-01 | BUG | `chain/evm` | `block_lag` read once, never refreshed |
-| B-02 | BUG | `db/mock` | `payments` keyed by wrong field |
-| B-03 | BUG | `db/mock` | Only one payment per invoice |
-| B-04 | BUG | `chain/evm` | `unwrap_or_default()` on TxHash/Address |
-| B-05 | BUG | `chain/evm` | `u64::MAX` fallback for block number |
-| B-06 | BUG | `chain/evm` | No retry limit on `get_logs` errors |
-| B-07 | BUG | `db/postgres`, `db/mock` | `cancel_invoice` ignores payments |
-| B-08 | BUG | `db/postgres` | `update_chain_block` cache inconsistency |
-| B-09 | BUG | `db/mock` | Mock/Postgres behavior mismatch |
-| B-10 | BUG | `chain/evm` | Provider rotation ordering mismatch |
-| B-11 | BUG | `chain/evm` | Infinite retry on transactions parse failure |
-| D-01 | DESIGN | `state/mod` | `get_free_slot` O(n^2) |
-| D-02 | DESIGN | `state/mod` | No graceful shutdown |
-| D-03 | DESIGN | `db/postgres` | No webhook job idempotency |
-| D-04 | DESIGN | `model` | `patch` can't clear `logo_url` |
-| D-05 | DESIGN | `state/mod` | Hardcoded channel capacity 100 |
-| D-06 | DESIGN | `state/webhook` | Busy-polling webhook dispatcher |
-| D-07 | DESIGN | `db/mod` | No pool health check config |
-| D-08 | DESIGN | `chain/evm` | Raw JSON parsing without typed structs |
-| D-09 | DESIGN | `state/mod` | Background task handles dropped |
-| D-10 | DESIGN | `model` | `Pagination` default limit is 0 |
+| ID       | Severity | Module | Description |
+|----------|----------|--------|-------------|
+| ~~C-01~~ | CRITICAL | `db/postgres` | SQL typo `&1` in `remove_token_by_id` |
+| C-02     | CRITICAL | `db/postgres` | `finalize_payment` ignores invoice status |
+| ~~C-03~~ | CRITICAL | `db/postgres` | `set_chain_active` not persisted to DB |
+| ~~C-04~~ | CRITICAL | `db/postgres` | `required_confirmations` truncated u64->i16 |
+| C-05     | CRITICAL | all | `RwLock::unwrap()` cascading panic on poison |
+| S-01     | SECURITY | `db/postgres`, `db/mock` | Hardcoded `'default_secret'` fallback |
+| S-02     | SECURITY | `state/webhook` | No SSRF protection on webhook URLs |
+| S-03     | SECURITY | `state/mod` | API key in plain String |
+| S-04     | SECURITY | `db/postgres`, `db/mock` | No input validation |
+| S-05     | SECURITY | `db/postgres` | Webhook secret exposed in API responses |
+| B-01     | BUG | `chain/evm` | `block_lag` read once, never refreshed |
+| B-02     | BUG | `db/mock` | `payments` keyed by wrong field |
+| B-03     | BUG | `db/mock` | Only one payment per invoice |
+| B-04     | BUG | `chain/evm` | `unwrap_or_default()` on TxHash/Address |
+| B-05     | BUG | `chain/evm` | `u64::MAX` fallback for block number |
+| B-06     | BUG | `chain/evm` | No retry limit on `get_logs` errors |
+| B-07     | BUG | `db/postgres`, `db/mock` | `cancel_invoice` ignores payments |
+| B-08     | BUG | `db/postgres` | `update_chain_block` cache inconsistency |
+| B-09     | BUG | `db/mock` | Mock/Postgres behavior mismatch |
+| B-10     | BUG | `chain/evm` | Provider rotation ordering mismatch |
+| B-11     | BUG | `chain/evm` | Infinite retry on transactions parse failure |
+| D-01     | DESIGN | `state/mod` | `get_free_slot` O(n^2) |
+| D-02     | DESIGN | `state/mod` | No graceful shutdown |
+| D-03     | DESIGN | `db/postgres` | No webhook job idempotency |
+| D-04     | DESIGN | `model` | `patch` can't clear `logo_url` |
+| D-05     | DESIGN | `state/mod` | Hardcoded channel capacity 100 |
+| D-06     | DESIGN | `state/webhook` | Busy-polling webhook dispatcher |
+| D-07     | DESIGN | `db/mod` | No pool health check config |
+| D-08     | DESIGN | `chain/evm` | Raw JSON parsing without typed structs |
+| D-09     | DESIGN | `state/mod` | Background task handles dropped |
+| D-10     | DESIGN | `model` | `Pagination` default limit is 0 |
 
 **Total: 31 findings** -- 5 Critical, 5 Security, 11 Bugs, 10 Design/Performance

@@ -397,7 +397,7 @@ impl DatabaseAdapter for Postgres {
             .bind(chain_update.last_processed_block.map(|x| x as i64))
             .bind(chain_update.xpub.to_owned())
             .bind(chain_update.block_lag.map(|x| x as i16))
-            .bind(chain_update.required_confirmations.map(|x| x as i16))
+            .bind(chain_update.required_confirmations.map(|x| x as i64))
             .bind(chain_update.active.clone())
             .bind(chain_update.logo_url.clone())
             .bind(chain_name)
@@ -487,6 +487,12 @@ impl DatabaseAdapter for Postgres {
     }
 
     async fn set_chain_active(&self, chain_name: &str, active: bool) -> anyhow::Result<()> {
+        sqlx::query("UPDATE chains SET active = $1 WHERE name = $2")
+            .bind(active)
+            .bind(chain_name)
+            .execute(&self.pool)
+            .await?;
+
         match self.chains_cache.read().unwrap().get(chain_name) {
             Some(c) => {
                 c.config().write().unwrap().active = active;
@@ -586,7 +592,7 @@ impl DatabaseAdapter for Postgres {
 
     async fn remove_token_by_id(&self, chain_name: &str, id: u32) -> anyhow::Result<()> {
         let symbol_opt: Option<String> = sqlx::query_scalar(
-            "DELETE FROM tokens WHERE id = &1 RETURNING symbol"
+            "DELETE FROM tokens WHERE id = $1 RETURNING symbol"
         )
             .bind(id as i32)
             .fetch_optional(&self.pool)
