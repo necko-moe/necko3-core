@@ -1,6 +1,6 @@
 use alloy::primitives::{Address, TxHash, U256};
+use alloy::primitives::utils::{format_units, parse_units};
 use coins_bip32::prelude::{Parent, XPub};
-use necko3_core::deps::{format_units, parse_units};
 use necko3_core::model::{
     ChainConfig, ChainType, Invoice, InvoiceFilter, InvoiceStatus, PaginatedVec, PartialChainUpdate,
     Payment, PaymentFilter, PaymentStatus, TokenConfig, Webhook, WebhookEvent, WebhookFilter,
