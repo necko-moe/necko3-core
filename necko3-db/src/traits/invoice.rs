@@ -13,8 +13,7 @@ pub trait InvoiceStore: Sync + Send {
     async fn get_pending_invoice_by_address(&self, chain_name: &str, address: &str) -> anyhow::Result<Option<Invoice>>;
     async fn expire_old_invoices(&self) -> anyhow::Result<Vec<ExpiredInvoiceInfo>>;
 
-    async fn update_invoice_paid(&self, invoice_id: Uuid, paid_raw: U256, paid: &str, new_status: Option<InvoiceStatus>) -> anyhow::Result<()>;
+    async fn update_invoice_paid(&self, invoice_id: Uuid, paid_raw: U256, new_status: Option<InvoiceStatus>) -> anyhow::Result<()>;
 
-    // SELECT address FROM invoices WHERE status = 'Pending' AND network = $1
     async fn get_watch_addresses(&self, chain_name: &str) -> anyhow::Result<Vec<String>>;
 }

@@ -1,6 +1,7 @@
 use alloy_primitives::{TxHash, U256};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use sqlx::FromRow;
 use sqlx::types::Json;
 use strum::{AsRefStr, Display, EnumString};
 use uuid::Uuid;
@@ -257,7 +258,7 @@ pub struct WebhookFilter {
     pub pagination: Pagination,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, FromRow, Serialize, Deserialize)]
 pub struct ExpiredInvoiceInfo {
     pub id: Uuid,
     pub network: String,

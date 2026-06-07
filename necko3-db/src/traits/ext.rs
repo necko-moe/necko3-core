@@ -1,10 +1,9 @@
-use std::collections::HashSet;
-use alloy_primitives::utils::format_units;
-use async_trait::async_trait;
-use chrono::Utc;
-use uuid::Uuid;
 use crate::model::{ChainConfig, InvoiceStatus, PaymentStatus, Webhook, WebhookEvent, WebhookStatus};
 use crate::traits::DatabaseAdapter;
+use async_trait::async_trait;
+use chrono::Utc;
+use std::collections::HashSet;
+use uuid::Uuid;
 
 #[async_trait]
 pub trait DatabaseExt: DatabaseAdapter {
@@ -52,13 +51,12 @@ pub trait DatabaseExt: DatabaseAdapter {
     }
 
     // token
-    async fn get_token_contracts(&self, chain_name: &str) -> anyhow::Result<Option<Vec<String>>> {
+    async fn get_token_contracts(&self, chain_name: &str) -> anyhow::Result<Vec<String>> {
         let tokens = self.get_tokens(chain_name).await?;
-        Ok(tokens.map(|vtc| {
-            vtc.into_iter()
-                .map(|tc| tc.contract)
-                .collect()
-        }))
+
+        Ok(tokens.into_iter()
+            .map(|tc| tc.contract)
+            .collect())
     }
 
     // invoice
@@ -82,14 +80,13 @@ pub trait DatabaseExt: DatabaseAdapter {
             .ok_or_else(|| anyhow::anyhow!("Invoice {} not found", payment.invoice_id))?;
 
         let new_paid_raw = invoice.paid_raw + payment.amount_raw;
-        let new_paid = format_units(new_paid_raw, invoice.decimals)?;
 
         let is_fully_paid = new_paid_raw >= invoice.amount_raw;
         let new_status = if is_fully_paid {
             Some(InvoiceStatus::Paid)
         } else { None };
 
-        self.update_invoice_paid(invoice.id, new_paid_raw, &new_paid, new_status).await?;
+        self.update_invoice_paid(invoice.id, new_paid_raw, new_status).await?;
 
         Ok(is_fully_paid)
     }

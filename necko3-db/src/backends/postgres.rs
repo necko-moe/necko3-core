@@ -1,16 +1,16 @@
-use std::str::FromStr;
-use alloy_primitives::U256;
+use crate::model::{ChainConfig, ChainType, ExpiredInvoiceInfo, Invoice, InvoiceFilter, InvoiceStatus, PaginatedVec, PartialChainUpdate, Payment, PaymentFilter, PaymentStatus, TokenConfig, Webhook, WebhookEvent, WebhookFilter, WebhookJob, WebhookStatus};
+use crate::traits::*;
 use alloy_primitives::utils::format_units;
+use alloy_primitives::U256;
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
-use crate::traits::*;
 use dashmap::DashMap;
 use serde_json::Value;
-use sqlx::{PgPool, QueryBuilder, Row};
 use sqlx::postgres::PgRow;
 use sqlx::types::BigDecimal;
+use sqlx::{PgPool, QueryBuilder, Row};
+use std::str::FromStr;
 use uuid::Uuid;
-use crate::model::{ChainConfig, ExpiredInvoiceInfo, Invoice, InvoiceFilter, InvoiceStatus, PaginatedVec, PartialChainUpdate, Payment, PaymentFilter, PaymentStatus, TokenConfig, Webhook, WebhookEvent, WebhookFilter, WebhookJob, WebhookStatus};
 
 pub struct PostgresDatabase {
     pool: PgPool,
@@ -35,6 +35,42 @@ impl PostgresDatabase {
 
     pub fn pool(&self) -> &PgPool {
         &self.pool
+    }
+
+    fn map_row_to_chain(
+        row: PgRow,
+    ) -> anyhow::Result<ChainConfig> {
+        let chain_str: String = row.get("chain_type");
+        let chain_type: ChainType = chain_str.parse()
+            .map_err(|e| anyhow::anyhow!("Invalid chain type: {}", e))?;
+
+        Ok(ChainConfig {
+            id: row.get("id"),
+            name: row.get("name"),
+            active: row.get("active"),
+            rpc_urls: row.get("rpc_urls"),
+            chain_type,
+            xpub: row.get("xpub"),
+            native_symbol: row.get("native_symbol"),
+            decimals: row.get::<i16, _>("decimals") as u8,
+            last_processed_block: row.get::<i64, _>("last_processed_block") as u64,
+            block_lag: row.get::<i16, _>("block_lag") as u8,
+            required_confirmations: row.get::<i64, _>("required_confirmations") as u64,
+            logo_url: row.get("logo_url"),
+        })
+    }
+
+    fn map_row_to_token(
+        row: PgRow,
+    ) -> TokenConfig {
+        TokenConfig {
+            id: row.get("id"),
+            chain_id: row.get("chain_id"),
+            symbol: row.get("symbol"),
+            contract: row.get("contract_address"),
+            decimals: row.get::<i16, _>("decimals") as u8,
+            logo_url: row.get("logo_url"),
+        }
     }
 
     fn map_row_to_invoice(
@@ -137,109 +173,514 @@ impl PostgresDatabase {
 #[async_trait]
 impl ChainStore for PostgresDatabase {
     async fn get_chains(&self) -> anyhow::Result<Vec<ChainConfig>> {
-        todo!()
+        let rows = sqlx::query(
+            r#"SELECT * FROM chains"#
+        )
+            .fetch_all(&self.pool)
+            .await?;
+
+        rows.into_iter()
+            .map(Self::map_row_to_chain)
+            .collect()
     }
 
     async fn get_chain(&self, chain_name: &str) -> anyhow::Result<Option<ChainConfig>> {
-        todo!()
+        let row = sqlx::query(
+            r#"SELECT * FROM chains WHERE name = $1"#
+        )
+            .bind(chain_name)
+            .fetch_optional(&self.pool)
+            .await?;
+
+        row.map(Self::map_row_to_chain).transpose()
     }
 
     async fn get_chain_by_id(&self, id: i32) -> anyhow::Result<Option<ChainConfig>> {
-        todo!()
+        let row = sqlx::query(
+            r#"SELECT * FROM chains WHERE id = $1"#
+        )
+            .bind(id)
+            .fetch_optional(&self.pool)
+            .await?;
+
+        row.map(Self::map_row_to_chain).transpose()
     }
 
     async fn add_chain(&self, chain_config: &ChainConfig) -> anyhow::Result<()> {
-        todo!()
+        sqlx::query(
+            r#"INSERT INTO chains
+                    (name, rpc_urls, chain_type, xpub, native_symbol, decimals,
+                     last_processed_block, block_lag, required_confirmations, active, logo_url)
+                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)"#,
+        )
+            .bind(&chain_config.name)
+            .bind(&chain_config.rpc_urls)
+            .bind(chain_config.chain_type.to_string())
+            .bind(&chain_config.xpub)
+            .bind(&chain_config.native_symbol)
+            .bind(chain_config.decimals as i16)
+            .bind(chain_config.last_processed_block as i64)
+            .bind(chain_config.block_lag as i16)
+            .bind(chain_config.required_confirmations as i64)
+            .bind(chain_config.active)
+            .bind(&chain_config.logo_url)
+            .execute(&self.pool)
+            .await?;
+
+        self.token_decimals
+            .insert((chain_config.name.clone(), chain_config.native_symbol.clone()), chain_config.decimals);
+
+        Ok(())
     }
 
-    async fn remove_chain(&self, chain_name: &str) -> anyhow::Result<()> {
-        todo!()
+    async fn remove_chain(&self, chain_name: &str) -> anyhow::Result<bool> {
+        let result = sqlx::query(
+            "DELETE FROM chains WHERE name = $1"
+        )
+            .bind(chain_name)
+            .execute(&self.pool)
+            .await?;
+
+        let deleted = result.rows_affected() > 0;
+        if deleted {
+            self.token_decimals
+                .retain(|(chain, _token), _| chain != chain_name);
+        }
+
+        Ok(deleted)
     }
 
     async fn chain_exists(&self, chain_name: &str) -> anyhow::Result<bool> {
-        todo!()
+        let exists: bool = sqlx::query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM chains WHERE name = $1)"
+        )
+            .bind(chain_name)
+            .fetch_one(&self.pool)
+            .await?;
+
+        Ok(exists)
     }
 
     async fn update_chain_partial(&self, chain_name: &str, chain_update: &PartialChainUpdate) -> anyhow::Result<()> {
-        todo!()
+        let result = sqlx::query(
+            r#"UPDATE chains SET
+                       rpc_urls = COALESCE($1, rpc_urls),
+                       last_processed_block = COALESCE($2, last_processed_block),
+                       xpub = COALESCE($3, xpub),
+                       block_lag = COALESCE($4, block_lag),
+                       required_confirmations = COALESCE($5, required_confirmations),
+                       active = COALESCE($6, active),
+                       logo_url = COALESCE($7, logo_url)
+                   WHERE name = $8"#
+        )
+            .bind(chain_update.rpc_urls.clone())
+            .bind(chain_update.last_processed_block.map(|x| x as i64))
+            .bind(chain_update.xpub.to_owned())
+            .bind(chain_update.block_lag.map(|x| x as i16))
+            .bind(chain_update.required_confirmations.map(|x| x as i64))
+            .bind(chain_update.active.clone())
+            .bind(chain_update.logo_url.clone())
+            .bind(chain_name)
+            .execute(&self.pool)
+            .await?;
+
+        if result.rows_affected() == 0 {
+            return Err(anyhow::anyhow!("Chain {} not found in DB", chain_name));
+        }
+
+        Ok(())
     }
 
-    async fn set_chain_active(&self, chain_name: &str, active: bool) -> anyhow::Result<()> {
-        todo!()
+    async fn update_chain_active(&self, chain_name: &str, active: bool) -> anyhow::Result<()> {
+        let result = sqlx::query(
+            "UPDATE chains SET active = $1 WHERE name = $2"
+        )
+            .bind(active)
+            .bind(chain_name)
+            .execute(&self.pool)
+            .await?;
+
+        if result.rows_affected() == 0 {
+            return Err(anyhow::anyhow!("Chain {} not found in DB", chain_name));
+        }
+
+        Ok(())
     }
 
     async fn update_chain_block(&self, chain_name: &str, block_num: u64) -> anyhow::Result<()> {
-        todo!()
+        let result = sqlx::query(
+            "UPDATE chains SET last_processed_block = $1 WHERE name = $2"
+        )
+            .bind(block_num as i64)
+            .bind(chain_name)
+            .execute(&self.pool)
+            .await?;
+
+        if result.rows_affected() == 0 {
+            return Err(anyhow::anyhow!("Chain {} not found in DB", chain_name));
+        }
+
+        Ok(())
     }
 }
 
 #[async_trait]
 impl TokenStore for PostgresDatabase {
-    async fn get_tokens(&self, chain_name: &str) -> anyhow::Result<Option<Vec<TokenConfig>>> {
-        todo!()
+    async fn get_tokens(&self, chain_name: &str) -> anyhow::Result<Vec<TokenConfig>> {
+        let rows = sqlx::query(
+            r#"SELECT t.*
+                   FROM tokens t
+                   JOIN chains c ON t.chain_id = c.id
+                   WHERE c.name = $1"#
+        )
+            .bind(chain_name)
+            .fetch_all(&self.pool)
+            .await?;
+
+        Ok(rows.into_iter()
+            .map(Self::map_row_to_token)
+            .collect())
     }
 
     async fn get_token(&self, chain_name: &str, token_symbol: &str) -> anyhow::Result<Option<TokenConfig>> {
-        todo!()
+        let row = sqlx::query(
+            r#"SELECT t.*
+                   FROM tokens t
+                   JOIN chains c ON t.chain_id = c.id
+                   WHERE c.name = $1 AND t.symbol = $2"#
+        )
+            .bind(chain_name)
+            .bind(token_symbol)
+            .fetch_optional(&self.pool)
+            .await?;
+
+        Ok(row.map(Self::map_row_to_token))
     }
 
     async fn get_token_by_id(&self, id: i32) -> anyhow::Result<Option<TokenConfig>> {
-        todo!()
+        let row = sqlx::query(
+            r#"SELECT * FROM tokens WHERE id = $1"#
+        )
+            .bind(id)
+            .fetch_optional(&self.pool)
+            .await?;
+
+        Ok(row.map(Self::map_row_to_token))
     }
 
     async fn get_token_by_contract(&self, chain_name: &str, contract_address: &str) -> anyhow::Result<Option<TokenConfig>> {
-        todo!()
+        let row = sqlx::query(
+            r#"SELECT t.*
+                   FROM tokens t
+                   JOIN chains c ON t.chain_id = c.id
+                   WHERE c.name = $1 AND t.contract_address = $2"#
+        )
+            .bind(chain_name)
+            .bind(contract_address)
+            .fetch_optional(&self.pool)
+            .await?;
+
+        Ok(row.map(Self::map_row_to_token))
     }
 
     async fn get_tokens_with_symbol(&self, token_symbol: &str) -> anyhow::Result<Vec<TokenConfig>> {
-        todo!()
+        let rows = sqlx::query(
+            r#"SELECT * FROM tokens WHERE symbol = $1"#
+        )
+            .bind(token_symbol)
+            .fetch_all(&self.pool)
+            .await?;
+
+        Ok(rows.into_iter()
+            .map(Self::map_row_to_token)
+            .collect())
     }
 
-    async fn remove_token(&self, chain_name: &str, id: u32) -> anyhow::Result<()> {
-        todo!()
+    async fn remove_token(&self, chain_name: &str, token_symbol: &str) -> anyhow::Result<bool> {
+        let result = sqlx::query(
+            r#"DELETE FROM tokens t
+                   USING chains c
+                   WHERE t.chain_id = c.id
+                       AND t.symbol = $1
+                       AND c.name = $2"#
+        )
+            .bind(token_symbol)
+            .bind(chain_name)
+            .execute(&self.pool)
+            .await?;
+
+        let deleted = result.rows_affected() > 0;
+        if deleted {
+            self.token_decimals
+                .remove(&(chain_name.to_string(), token_symbol.to_string()));
+        }
+
+        Ok(deleted)
     }
 
     async fn add_token(&self, chain_name: &str, token_config: &TokenConfig) -> anyhow::Result<()> {
-        todo!()
+        let result = sqlx::query(
+            r#"INSERT INTO tokens
+               (chain_id, symbol, contract_address, decimals, logo_url)
+               SELECT id, $2, $3, $4, $5
+               FROM chains
+               WHERE name = $1"#
+        )
+            .bind(chain_name)
+            .bind(&token_config.symbol)
+            .bind(&token_config.contract)
+            .bind(token_config.decimals as i16)
+            .bind(&token_config.logo_url)
+            .execute(&self.pool)
+            .await?;
+
+        if result.rows_affected() == 0 {
+            anyhow::bail!("Chain {} not found in DB", chain_name)
+        }
+
+        self.token_decimals
+            .insert((chain_name.to_owned(), token_config.symbol.clone()), token_config.decimals);
+
+        Ok(())
     }
 
-    async fn get_token_decimals(&self, chain_name: &str, token_symbol: &str) -> anyhow::Result<u8> {
-        todo!()
+    async fn get_token_decimals(&self, chain_name: &str, token_symbol: &str) -> anyhow::Result<Option<u8>> {
+        if let Some(d) = self.token_decimals
+            .get(&(chain_name.to_string(), token_symbol.to_string())) {
+            return Ok(Some(*d.value()))
+        }
+
+        // native
+        let native: Option<(String, String, i16)> = sqlx::query_as(
+            r#"SELECT id, chains.native_symbol, chains.decimals FROM chains WHERE name = $1"#
+        )
+            .bind(chain_name)
+            .fetch_optional(&self.pool)
+            .await?;
+
+        let (chain_id, native_symbol, native_decimals) = match native {
+            Some((ci, ns, nd)) => (ci, ns, nd as u8),
+            None => { return Ok(None) }
+        };
+
+        self.token_decimals
+            .insert((chain_name.to_owned(), native_symbol.clone()), native_decimals);
+
+        if native_symbol == token_symbol {
+            return Ok(Some(native_decimals));
+        }
+
+        // token
+        let token_decimals_opt: Option<i16> = sqlx::query_scalar(
+            r#"SELECT tokens.decimals FROM tokens WHERE symbol = $1 AND chain_id = $2"#
+        )
+            .bind(token_symbol)
+            .bind(chain_id)
+            .fetch_optional(&self.pool)
+            .await?;
+
+        if let Some(token_decimals) = token_decimals_opt {
+            let token_decimals = token_decimals as u8;
+            self.token_decimals
+                .insert((chain_name.to_owned(), token_symbol.to_owned()), token_decimals);
+
+            return Ok(Some(token_decimals));
+        }
+
+        Ok(None)
     }
 }
 
 #[async_trait]
 impl InvoiceStore for PostgresDatabase {
     async fn get_invoices(&self, filter: InvoiceFilter) -> anyhow::Result<PaginatedVec<Invoice>> {
-        todo!()
+        fn apply_filters(
+            builder: &mut QueryBuilder<sqlx::Postgres>,
+            filter: &InvoiceFilter
+        ) {
+            if let Some(ref status) = filter.status {
+                builder.push(" AND status = ");
+                builder.push_bind(status.to_string());
+            }
+
+            if let Some(ref address) = filter.address {
+                builder.push(" AND address = ");
+                builder.push_bind(address);
+            }
+
+            if let Some(ref network) = filter.network {
+                builder.push(" AND network = ");
+                builder.push_bind(network);
+            }
+
+            if let Some(ref token) = filter.token {
+                builder.push(" AND token = ");
+                builder.push_bind(token);
+            }
+        }
+
+        let mut count_builder: QueryBuilder<sqlx::Postgres> = QueryBuilder::new(
+            "SELECT count(*) FROM invoices WHERE TRUE");
+
+        apply_filters(&mut count_builder, &filter);
+
+        let total: i64 = count_builder
+            .build_query_as::<(i64,)>()
+            .fetch_one(&self.pool)
+            .await?
+            .0;
+
+        let mut data_builder: QueryBuilder<sqlx::Postgres> = QueryBuilder::new(
+            r#"SELECT
+                    id, address, address_index, network, token, amount_raw::TEXT, paid_raw::TEXT,
+                    status, decimals, webhook_url, webhook_secret, webhook_max_retries, created_at, expires_at
+                FROM invoices WHERE TRUE"# // WHERE TRUE so that arguments don't have to think that they can be first
+        );
+
+        apply_filters(&mut data_builder, &filter);
+
+        data_builder.push(" ORDER BY created_at DESC ");
+        data_builder.push(" LIMIT ");
+        data_builder.push_bind(filter.pagination.limit as i64);
+        data_builder.push(" OFFSET ");
+        data_builder.push_bind(filter.pagination.offset as i64);
+
+        let rows = data_builder
+            .build()
+            .fetch_all(&self.pool)
+            .await?;
+
+        let invoices: Vec<Invoice> = rows
+            .into_iter()
+            .map(Self::map_row_to_invoice)
+            .collect::<anyhow::Result<_>>()?;
+
+        Ok(PaginatedVec::new(
+            invoices,
+            total as u64,
+            filter.pagination.offset,
+            filter.pagination.limit,
+        ))
     }
 
     async fn get_invoice(&self, invoice_id: Uuid) -> anyhow::Result<Option<Invoice>> {
-        todo!()
+        sqlx::query(
+            r#"SELECT
+                       id, address, address_index, network, token, amount_raw::TEXT, paid_raw::TEXT,
+                       status, decimals, webhook_url, webhook_secret, webhook_max_retries, created_at, expires_at
+                   FROM invoices WHERE id = $1"#
+        )
+            .bind(invoice_id)
+            .fetch_optional(&self.pool)
+            .await?
+            .map(Self::map_row_to_invoice)
+            .transpose()
     }
 
     async fn add_invoice(&self, invoice: &Invoice) -> anyhow::Result<()> {
-        todo!()
+        let amount_bd = BigDecimal::from_str(&invoice.amount_raw.to_string())?;
+        let paid_bd = BigDecimal::from_str(&invoice.paid_raw.to_string())?;
+
+        sqlx::query(
+            r#"INSERT INTO invoices
+                   (id, address, address_index, network, token, amount_raw, paid_raw, status,
+                    created_at, expires_at, decimals, webhook_url, webhook_secret, webhook_max_retries)
+                   VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)"#
+        )
+            .bind(invoice.id)
+            .bind(&invoice.address)
+            .bind(invoice.address_index as i32)
+            .bind(&invoice.network)
+            .bind(&invoice.token)
+            .bind(&amount_bd)
+            .bind(&paid_bd)
+            .bind(invoice.status.to_string())
+            .bind(invoice.created_at)
+            .bind(invoice.expires_at)
+            .bind(invoice.decimals as i16)
+            .bind(&invoice.webhook_url)
+            .bind(&invoice.webhook_secret)
+            .bind(invoice.webhook_max_retries.map(|x| x as i32))
+            .execute(&self.pool)
+            .await?;
+
+        Ok(())
     }
 
     async fn update_invoice_status(&self, invoice_id: Uuid, status: InvoiceStatus) -> anyhow::Result<()> {
-        todo!()
+        sqlx::query(
+            "UPDATE invoices SET status = $1 WHERE id = $2"
+        )
+            .bind(status.to_string())
+            .bind(invoice_id)
+            .execute(&self.pool)
+            .await?;
+
+        Ok(())
     }
 
     async fn get_pending_invoice_by_address(&self, chain_name: &str, address: &str) -> anyhow::Result<Option<Invoice>> {
-        todo!()
+        let row = sqlx::query(
+            r#"SELECT
+                       id, address, address_index, network, token, amount_raw::TEXT, paid_raw::TEXT,
+                       status, decimals, created_at, expires_at, webhook_url, webhook_secret, webhook_max_retries
+                   FROM invoices WHERE network = $1 AND address = $2 AND status = 'Pending'"#
+        )
+            .bind(chain_name)
+            .bind(address)
+            .fetch_optional(&self.pool)
+            .await?;
+
+        row.map(Self::map_row_to_invoice).transpose()
     }
 
     async fn expire_old_invoices(&self) -> anyhow::Result<Vec<ExpiredInvoiceInfo>> {
-        todo!()
+        let rows = sqlx::query_as::<_, ExpiredInvoiceInfo>(
+            r#"UPDATE invoices
+                   SET status = 'Expired'
+                   WHERE status = 'Pending' AND expires_at <= now()
+                   RETURNING id, network, address"#
+        )
+            .fetch_all(&self.pool)
+            .await?;
+
+        Ok(rows)
     }
 
-    async fn update_invoice_paid(&self, invoice_id: Uuid, paid_raw: U256, paid: &str, new_status: Option<InvoiceStatus>) -> anyhow::Result<()> {
-        todo!()
+    async fn update_invoice_paid(&self, invoice_id: Uuid, paid_raw: U256, new_status: Option<InvoiceStatus>) -> anyhow::Result<()> {
+        let paid_bd = BigDecimal::from_str(&paid_raw.to_string())?;
+
+        if let Some(status) = new_status {
+            sqlx::query(
+                "UPDATE invoices SET paid_raw = $1, status = $2 WHERE id = $3"
+            )
+                .bind(&paid_bd)
+                .bind(status.to_string())
+                .bind(invoice_id)
+                .execute(&self.pool)
+                .await?;
+        } else {
+            sqlx::query(
+                "UPDATE invoices SET paid_raw = $1 WHERE id = $2"
+            )
+                .bind(&paid_bd)
+                .bind(invoice_id)
+                .execute(&self.pool)
+                .await?;
+        }
+
+        Ok(())
     }
 
     async fn get_watch_addresses(&self, chain_name: &str) -> anyhow::Result<Vec<String>> {
-        todo!()
+        let rows: Vec<String> = sqlx::query_scalar(
+            "SELECT address FROM invoices WHERE status = 'Pending' AND network = $1"
+        )
+            .bind(chain_name)
+            .fetch_all(&self.pool)
+            .await?;
+
+        Ok(rows)
     }
 }
 
@@ -349,7 +790,7 @@ impl PaymentStore for PostgresDatabase {
             r#"SELECT id, invoice_id, "from", "to", network, tx_hash, token,
                        amount_raw::TEXT, block_number, status, created_at, log_index
                    FROM payments WHERE status = $1"#)
-            .bind(PaymentStatus::Confirming.to_string())
+            .bind(PaymentStatus::Confirming.as_ref())
             .fetch_all(&self.pool)
             .await?;
 
@@ -554,6 +995,24 @@ impl WebhookStore for PostgresDatabase {
             .await?;
 
         Ok(())
+    }
+}
+
+#[async_trait]
+impl XPubStore for PostgresDatabase {
+    async fn next_derivation_index(&self, xpub: &str) -> anyhow::Result<u64> {
+        let index: i64 = sqlx::query_scalar(
+            r#"INSERT INTO xpub_states (xpub, last_used_index)
+                   VALUES ($1, 0)
+                   ON CONFLICT (xpub)
+                   DO UPDATE SET last_used_index = last_used_index + 1
+                   RETURNING last_used_index;"#
+        )
+            .bind(xpub)
+            .fetch_one(&self.pool)
+            .await?;
+
+        Ok(index as u64)
     }
 }
 
