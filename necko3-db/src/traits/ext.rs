@@ -2,6 +2,7 @@ use std::collections::HashSet;
 use alloy_primitives::utils::format_units;
 use async_trait::async_trait;
 use chrono::Utc;
+use uuid::Uuid;
 use crate::model::{ChainConfig, InvoiceStatus, PaymentStatus, Webhook, WebhookEvent, WebhookStatus};
 use crate::traits::DatabaseAdapter;
 
@@ -61,23 +62,23 @@ pub trait DatabaseExt: DatabaseAdapter {
     }
 
     // invoice
-    async fn cancel_invoice(&self, uuid: &str) -> anyhow::Result<()> {
+    async fn cancel_invoice(&self, uuid: Uuid) -> anyhow::Result<()> {
         self.update_invoice_status(uuid, InvoiceStatus::Cancelled).await
     }
 
-    async fn get_invoice_status(&self, uuid: &str) -> anyhow::Result<Option<InvoiceStatus>> {
+    async fn get_invoice_status(&self, uuid: Uuid) -> anyhow::Result<Option<InvoiceStatus>> {
         Ok(self.get_invoice(uuid).await?
             .map(|i| i.status))
     }
 
     // payment
-    async fn finalize_payment(&self, payment_id: &str) -> anyhow::Result<bool> {
+    async fn finalize_payment(&self, payment_id: Uuid) -> anyhow::Result<bool> {
         let payment = self.get_payment(payment_id).await?
             .ok_or_else(|| anyhow::anyhow!("Payment {} not found", payment_id))?;
 
         self.update_payment_status(payment_id, PaymentStatus::Confirmed).await?;
 
-        let invoice = self.get_invoice(&payment.invoice_id).await?
+        let invoice = self.get_invoice(payment.invoice_id).await?
             .ok_or_else(|| anyhow::anyhow!("Invoice {} not found", payment.invoice_id))?;
 
         let new_paid_raw = invoice.paid_raw + payment.amount_raw;
@@ -88,17 +89,17 @@ pub trait DatabaseExt: DatabaseAdapter {
             Some(InvoiceStatus::Paid)
         } else { None };
 
-        self.update_invoice_paid(&invoice.id, new_paid_raw, &new_paid, new_status).await?;
+        self.update_invoice_paid(invoice.id, new_paid_raw, &new_paid, new_status).await?;
 
         Ok(is_fully_paid)
     }
 
-    async fn cancel_payment(&self, payment_id: &str) -> anyhow::Result<()> {
+    async fn cancel_payment(&self, payment_id: Uuid) -> anyhow::Result<()> {
         self.update_payment_status(payment_id, PaymentStatus::Cancelled).await
     }
 
     // webhook
-    async fn create_webhook_job(&self, invoice_id: &str, event: &WebhookEvent) -> anyhow::Result<()> {
+    async fn create_webhook_job(&self, invoice_id: Uuid, event: &WebhookEvent) -> anyhow::Result<()> {
         let invoice = self.get_invoice(invoice_id).await?
             .ok_or_else(|| anyhow::anyhow!("Invoice {} not found", invoice_id))?;
 
@@ -109,7 +110,7 @@ pub trait DatabaseExt: DatabaseAdapter {
 
         let now = Utc::now();
         let webhook = Webhook {
-            id: uuid::Uuid::new_v4().to_string(),
+            id: Uuid::new_v4(),
             invoice_id: invoice_id.to_owned(),
             url,
             payload: event.clone(),
@@ -123,7 +124,7 @@ pub trait DatabaseExt: DatabaseAdapter {
         self.add_webhook(&webhook).await
     }
 
-    async fn cancel_webhook(&self, webhook_id: &str) -> anyhow::Result<()> {
+    async fn cancel_webhook(&self, webhook_id: Uuid) -> anyhow::Result<()> {
         self.update_webhook_status(webhook_id, WebhookStatus::Cancelled).await
     }
 }

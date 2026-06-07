@@ -3,6 +3,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use sqlx::types::Json;
 use strum::{AsRefStr, Display, EnumString};
+use uuid::Uuid;
 
 #[derive(Debug, Clone, Eq, Hash, PartialEq, Deserialize, Serialize)]
 pub struct TokenConfig {
@@ -44,8 +45,8 @@ impl ChainConfig {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Payment {
-    pub id: String,
-    pub invoice_id: String,
+    pub id: Uuid,
+    pub invoice_id: Uuid,
     pub from: String,
     pub to: String,
     pub network: String,
@@ -100,7 +101,7 @@ pub enum PaymentStatus {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct Invoice {
-    pub id: String,
+    pub id: Uuid,
     pub address_index: u32,
     pub address: String,
     pub amount: String,
@@ -131,8 +132,8 @@ pub struct PartialChainUpdate {
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct Webhook {
-    pub id: String,
-    pub invoice_id: String,
+    pub id: Uuid,
+    pub invoice_id: Uuid,
     pub url: String,
     pub payload: WebhookEvent,
     pub status: WebhookStatus,
@@ -144,7 +145,7 @@ pub struct Webhook {
 
 #[derive(Debug, sqlx::FromRow)]
 pub struct WebhookJob {
-    pub id: uuid::Uuid,
+    pub id: Uuid,
     pub url: String,
     pub secret_key: String,
     pub payload: Json<WebhookEvent>,
@@ -158,22 +159,22 @@ pub struct WebhookJob {
 #[strum(serialize_all = "snake_case")]
 pub enum WebhookEvent {
     TxDetected {
-        invoice_id: String,
+        invoice_id: Uuid,
         tx_hash: String,
         amount: String,
         currency: String,
     },
     TxConfirmed {
-        invoice_id: String,
+        invoice_id: Uuid,
         tx_hash: String,
         confirmations: u64,
     },
     InvoicePaid {
-        invoice_id: String,
+        invoice_id: Uuid,
         paid_amount: String,
     },
     InvoiceExpired {
-        invoice_id: String,
+        invoice_id: Uuid,
     },
 }
 
@@ -234,7 +235,7 @@ pub struct InvoiceFilter {
 
 #[derive(Default, Clone, Debug, Deserialize, Serialize)]
 pub struct PaymentFilter {
-    pub invoice_id: Option<String>,
+    pub invoice_id: Option<Uuid>,
     pub from: Option<String>,
     pub to: Option<String>,
     pub network: Option<String>,
@@ -247,7 +248,7 @@ pub struct PaymentFilter {
 
 #[derive(Default, Clone, Debug, Deserialize, Serialize)]
 pub struct WebhookFilter {
-    pub invoice_id: Option<String>,
+    pub invoice_id: Option<Uuid>,
     /// WebhookEvent::to_string()
     pub event_type: Option<String>,
     pub url: Option<String>,
@@ -258,7 +259,7 @@ pub struct WebhookFilter {
 
 #[derive(Debug, Clone)]
 pub struct ExpiredInvoiceInfo {
-    pub id: String,
+    pub id: Uuid,
     pub network: String,
     pub address: String,
 }

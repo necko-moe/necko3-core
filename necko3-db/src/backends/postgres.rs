@@ -1,10 +1,16 @@
+use std::str::FromStr;
 use alloy_primitives::U256;
+use alloy_primitives::utils::format_units;
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use crate::traits::*;
 use dashmap::DashMap;
-use sqlx::PgPool;
-use crate::model::{ChainConfig, ExpiredInvoiceInfo, Invoice, InvoiceFilter, InvoiceStatus, PaginatedVec, PartialChainUpdate, Payment, PaymentFilter, PaymentStatus, TokenConfig, Webhook, WebhookFilter, WebhookJob, WebhookStatus};
+use serde_json::Value;
+use sqlx::{PgPool, QueryBuilder, Row};
+use sqlx::postgres::PgRow;
+use sqlx::types::BigDecimal;
+use uuid::Uuid;
+use crate::model::{ChainConfig, ExpiredInvoiceInfo, Invoice, InvoiceFilter, InvoiceStatus, PaginatedVec, PartialChainUpdate, Payment, PaymentFilter, PaymentStatus, TokenConfig, Webhook, WebhookEvent, WebhookFilter, WebhookJob, WebhookStatus};
 
 pub struct PostgresDatabase {
     pool: PgPool,
@@ -29,6 +35,102 @@ impl PostgresDatabase {
 
     pub fn pool(&self) -> &PgPool {
         &self.pool
+    }
+
+    fn map_row_to_invoice(
+        row: PgRow
+    ) -> anyhow::Result<Invoice> {
+        let status_str: String = row.get("status");
+        let status: InvoiceStatus = status_str.parse()
+            .map_err(|e| anyhow::anyhow!("Unknown invoice status '{}' from DB: {}", status_str, e))?;
+
+        let amount_str: String = row.get("amount_raw");
+        let paid_str: String = row.get("paid_raw");
+
+        let amount_raw = U256::from_str(&amount_str)
+            .map_err(|e| anyhow::anyhow!("Failed to parse amount_raw: {}", e))?;
+        let paid_raw = U256::from_str(&paid_str)
+            .map_err(|e| anyhow::anyhow!("Failed to parse paid_raw: {}", e))?;
+
+        let network: String = row.get("network");
+        let token: String = row.get("token");
+
+        let decimals = row.get::<i16, _>("decimals") as u8;
+
+        let amount_human = format_units(amount_raw, decimals)?;
+        let paid_human = format_units(paid_raw, decimals)?;
+
+        Ok(Invoice {
+            id: row.get::<Uuid, _>("id"),
+            address: row.get("address"),
+            address_index: row.get::<i32, _>("address_index") as u32,
+            network,
+            token,
+            amount_raw,
+            paid_raw,
+            amount: amount_human,
+            paid: paid_human,
+            status,
+            decimals,
+            webhook_url: row.get("webhook_url"),
+            webhook_secret: row.get("webhook_secret"),
+            webhook_max_retries: row.get::<Option<i32>, _>("webhook_max_retries")
+                .map(|x| x as u32),
+            created_at: row.get("created_at"),
+            expires_at: row.get("expires_at"),
+        })
+    }
+
+    fn map_row_to_payment(
+        row: PgRow
+    ) -> anyhow::Result<Payment> {
+        let status_str: String = row.get("status");
+        let status: PaymentStatus = status_str.parse()
+            .map_err(|e| anyhow::anyhow!("Unknown payment status '{}' from DB: {}", status_str, e))?;
+
+        let amount_bd: String = row.get("amount_raw");
+        let amount_raw = U256::from_str(&amount_bd)
+            .map_err(|e| anyhow::anyhow!("Failed to parse amount_raw: {}", e))?;
+
+        Ok(Payment {
+            id: row.get::<Uuid, _>("id"),
+            invoice_id: row.get::<Uuid, _>("invoice_id"),
+            from: row.get("from"),
+            to: row.get("to"),
+            network: row.get("network"),
+            token: row.get("token"),
+            tx_hash: row.get("tx_hash"),
+            amount_raw,
+            block_number: row.get::<i64, _>("block_number") as u64,
+            status,
+            created_at: row.get("created_at"),
+            log_index: row.get::<i64, _>("log_index") as u64,
+        })
+    }
+
+    fn map_row_to_webhook(
+        row: PgRow
+    ) -> anyhow::Result<Webhook> {
+        let status_str: String = row.get("status");
+        let status: WebhookStatus = status_str.parse()
+            .map_err(|e| anyhow::anyhow!("Unknown webhook status '{}' from DB: {}", status_str, e))?;
+
+        let db_payload: Value = row.get("payload");
+
+        let payload_enum: WebhookEvent = serde_json::from_value(db_payload)
+            .map_err(|e| anyhow::anyhow!("Failed to deserialize webhook payload: {}", e))?;
+
+        Ok(Webhook {
+            id: row.get::<Uuid, _>("id"),
+            invoice_id: row.get::<Uuid, _>("invoice_id"),
+            url: row.get("url"),
+            payload: payload_enum,
+            status,
+            attempts: row.get::<i32, _>("attempts") as u32,
+            max_retries: row.get::<i32, _>("max_retries") as u32,
+            next_retry: row.get("next_retry"),
+            created_at: row.get("created_at"),
+        })
     }
 }
 
@@ -112,7 +214,7 @@ impl InvoiceStore for PostgresDatabase {
         todo!()
     }
 
-    async fn get_invoice(&self, uuid: &str) -> anyhow::Result<Option<Invoice>> {
+    async fn get_invoice(&self, invoice_id: Uuid) -> anyhow::Result<Option<Invoice>> {
         todo!()
     }
 
@@ -120,7 +222,7 @@ impl InvoiceStore for PostgresDatabase {
         todo!()
     }
 
-    async fn update_invoice_status(&self, uuid: &str, status: InvoiceStatus) -> anyhow::Result<()> {
+    async fn update_invoice_status(&self, invoice_id: Uuid, status: InvoiceStatus) -> anyhow::Result<()> {
         todo!()
     }
 
@@ -132,7 +234,7 @@ impl InvoiceStore for PostgresDatabase {
         todo!()
     }
 
-    async fn update_invoice_paid(&self, id: &str, paid_raw: U256, paid: &str, new_status: Option<InvoiceStatus>) -> anyhow::Result<()> {
+    async fn update_invoice_paid(&self, invoice_id: Uuid, paid_raw: U256, paid: &str, new_status: Option<InvoiceStatus>) -> anyhow::Result<()> {
         todo!()
     }
 
@@ -144,54 +246,314 @@ impl InvoiceStore for PostgresDatabase {
 #[async_trait]
 impl PaymentStore for PostgresDatabase {
     async fn get_payments(&self, filter: PaymentFilter) -> anyhow::Result<PaginatedVec<Payment>> {
-        todo!()
+        fn apply_filters(
+            builder: &mut QueryBuilder<sqlx::Postgres>,
+            filter: &PaymentFilter
+        ) -> anyhow::Result<()> {
+            if let Some(ref invoice_id) = filter.invoice_id {
+                builder.push(" AND invoice_id = ");
+                builder.push_bind(invoice_id);
+            }
+
+            if let Some(ref from) = filter.from {
+                builder.push(r#" AND "from" = "#);
+                builder.push_bind(from);
+            }
+
+            if let Some(ref to) = filter.to {
+                builder.push(r#" AND "to" = "#);
+                builder.push_bind(to);
+            }
+
+            if let Some(ref network) = filter.network {
+                builder.push(" AND network = ");
+                builder.push_bind(network);
+            }
+
+            if let Some(ref token) = filter.token {
+                builder.push(" AND token = ");
+                builder.push_bind(token);
+            }
+
+            if let Some(ref block_number) = filter.block_number {
+                builder.push(" AND block_number = ");
+                builder.push_bind(*block_number as i64);
+            }
+
+            if let Some(ref status) = filter.status {
+                builder.push(" AND status = ");
+                builder.push_bind(status.to_string());
+            }
+
+            Ok(())
+        }
+
+        let mut count_builder: QueryBuilder<sqlx::Postgres> = QueryBuilder::new(
+            "SELECT count(*) FROM payments WHERE TRUE");
+
+        apply_filters(&mut count_builder, &filter)?;
+
+        let total: i64 = count_builder
+            .build_query_as::<(i64,)>()
+            .fetch_one(&self.pool)
+            .await?
+            .0;
+
+        let mut data_builder: QueryBuilder<sqlx::Postgres> = QueryBuilder::new(
+            r#"SELECT
+                    id, invoice_id, "from", "to", network, tx_hash, token, amount_raw::TEXT,
+                    block_number, status, created_at, log_index
+                FROM payments WHERE TRUE"#
+        );
+
+        apply_filters(&mut data_builder, &filter)?;
+
+        data_builder.push(" ORDER BY created_at DESC LIMIT ");
+        data_builder.push_bind(filter.pagination.limit as i64);
+        data_builder.push(" OFFSET ");
+        data_builder.push_bind(filter.pagination.offset as i64);
+
+        let rows = data_builder
+            .build()
+            .fetch_all(&self.pool)
+            .await?;
+
+        let payments: Vec<Payment> = rows
+            .into_iter()
+            .map(Self::map_row_to_payment)
+            .collect::<anyhow::Result<_>>()?;
+
+        Ok(PaginatedVec::new(
+            payments,
+            total as u64,
+            filter.pagination.offset,
+            filter.pagination.limit,
+        ))
     }
 
-    async fn get_payment(&self, payment_id: &str) -> anyhow::Result<Option<Payment>> {
-        todo!()
+    async fn get_payment(&self, payment_id: Uuid) -> anyhow::Result<Option<Payment>> {
+        sqlx::query(
+            r#"SELECT id, invoice_id, "from", "to", network, tx_hash, token,
+                       amount_raw::TEXT, block_number, status, created_at, log_index
+                   FROM payments WHERE id = $1"#
+        )
+            .bind(payment_id)
+            .fetch_optional(&self.pool)
+            .await?
+            .map(Self::map_row_to_payment)
+            .transpose()
     }
 
     async fn get_confirming_payments(&self) -> anyhow::Result<Vec<Payment>> {
-        todo!()
+        let rows = sqlx::query(
+            r#"SELECT id, invoice_id, "from", "to", network, tx_hash, token,
+                       amount_raw::TEXT, block_number, status, created_at, log_index
+                   FROM payments WHERE status = $1"#)
+            .bind(PaymentStatus::Confirming.to_string())
+            .fetch_all(&self.pool)
+            .await?;
+
+        rows.into_iter().map(Self::map_row_to_payment).collect()
     }
 
     async fn upsert_payment(&self, payment: &Payment) -> anyhow::Result<()> {
-        todo!()
+        let amount_bd = BigDecimal::from_str(&payment.amount_raw.to_string())?;
+
+        sqlx::query(
+            r#"INSERT INTO payments (invoice_id, "from", "to", network, tx_hash, amount_raw,
+                      block_number, status, log_index, token)
+                   VALUES ($1, $2, $3, $4, $5, $6, $7, 'Confirming', $8, $9)
+                   ON CONFLICT (tx_hash, log_index, network)
+                   DO UPDATE SET block_number = excluded.block_number"#
+        )
+            .bind(payment.invoice_id)
+            .bind(&payment.from)
+            .bind(&payment.to)
+            .bind(&payment.network)
+            .bind(&payment.tx_hash)
+            .bind(amount_bd)
+            .bind(payment.block_number as i64)
+            .bind(payment.log_index as i64)
+            .bind(&payment.token)
+            .execute(&self.pool)
+            .await?;
+
+        Ok(())
     }
 
-    async fn update_payment_status(&self, payment_id: &str, status: PaymentStatus) -> anyhow::Result<()> {
-        todo!()
+    async fn update_payment_status(&self, payment_id: Uuid, status: PaymentStatus) -> anyhow::Result<()> {
+        sqlx::query(
+            "UPDATE webhooks SET status = $1 WHERE id = $2"
+        )
+            .bind(status.to_string())
+            .bind(payment_id)
+            .execute(&self.pool)
+            .await?;
+
+        Ok(())
     }
 
-    async fn update_payment_block_number(&self, payment_id: &str, block_num: u64) -> anyhow::Result<()> {
-        todo!()
+    async fn update_payment_block_number(&self, payment_id: Uuid, block_num: u64) -> anyhow::Result<()> {
+        sqlx::query("UPDATE payments SET block_number = $1 WHERE id = $2")
+            .bind(block_num as i64)
+            .bind(payment_id)
+            .execute(&self.pool)
+            .await?;
+
+        Ok(())
     }
 }
 
 #[async_trait]
 impl WebhookStore for PostgresDatabase {
     async fn get_webhooks(&self, filter: WebhookFilter) -> anyhow::Result<PaginatedVec<Webhook>> {
-        todo!()
+        fn apply_filters(
+            builder: &mut QueryBuilder<sqlx::Postgres>,
+            filter: &WebhookFilter
+        ) -> anyhow::Result<()> {
+            if let Some(ref invoice_id) = filter.invoice_id {
+                builder.push(" AND invoice_id = ");
+                builder.push_bind(invoice_id);
+            }
+
+            if let Some(ref event_type) = filter.event_type {
+                builder.push(" AND event_type = ");
+                builder.push_bind(event_type);
+            }
+
+            if let Some(ref url) = filter.url {
+                builder.push(" AND url = ");
+                builder.push_bind(url);
+            }
+
+            if let Some(ref status) = filter.status {
+                builder.push(" AND status = ");
+                builder.push_bind(status.to_string());
+            }
+
+            Ok(())
+        }
+
+        let mut count_builder: QueryBuilder<sqlx::Postgres> = QueryBuilder::new(
+            "SELECT count(*) FROM webhooks WHERE TRUE");
+
+        apply_filters(&mut count_builder, &filter)?;
+
+        let total: i64 = count_builder
+            .build_query_as::<(i64,)>()
+            .fetch_one(&self.pool)
+            .await?
+            .0;
+
+        let mut data_builder: QueryBuilder<sqlx::Postgres> = QueryBuilder::new(
+            r#"SELECT * FROM webhooks WHERE TRUE"#);
+
+        apply_filters(&mut data_builder, &filter)?;
+
+        data_builder.push(" ORDER BY created_at DESC LIMIT ");
+        data_builder.push_bind(filter.pagination.limit as i64);
+        data_builder.push(" OFFSET ");
+        data_builder.push_bind(filter.pagination.offset as i64);
+
+        let rows = data_builder
+            .build()
+            .fetch_all(&self.pool)
+            .await?;
+
+        let webhooks: Vec<Webhook> = rows
+            .into_iter()
+            .map(Self::map_row_to_webhook)
+            .collect::<anyhow::Result<_>>()?;
+
+        Ok(PaginatedVec::new(
+            webhooks,
+            total as u64,
+            filter.pagination.offset,
+            filter.pagination.limit,
+        ))
     }
 
-    async fn get_webhook(&self, webhook_id: &str) -> anyhow::Result<Option<Webhook>> {
-        todo!()
+    async fn get_webhook(&self, webhook_id: Uuid) -> anyhow::Result<Option<Webhook>> {
+        sqlx::query(
+            r#"SELECT * FROM webhooks WHERE id = $1"#
+        )
+            .bind(webhook_id)
+            .fetch_optional(&self.pool)
+            .await?
+            .map(Self::map_row_to_webhook)
+            .transpose()
     }
 
     async fn add_webhook(&self, webhook: &Webhook) -> anyhow::Result<()> {
-        todo!()
+        let event_type = webhook.payload.as_ref();
+        let payload = serde_json::to_value(&webhook.payload)?;
+
+        sqlx::query(
+            r#"INSERT INTO webhooks (id, invoice_id, event_type, url, payload, max_retries, status)
+                       VALUES ($1, $2, $3, $4, $5, $6, $7)"#
+        )
+            .bind(webhook.id)
+            .bind(webhook.invoice_id)
+            .bind(event_type)
+            .bind(&webhook.url)
+            .bind(payload)
+            .bind(webhook.max_retries as i32)
+            .bind(webhook.status.to_string())
+            .execute(&self.pool)
+            .await?;
+
+        Ok(())
     }
 
     async fn select_pending_webhooks(&self, limit: usize) -> anyhow::Result<Vec<WebhookJob>> {
-        todo!()
+        let mut tx = self.pool.begin().await?;
+
+        let jobs = sqlx::query_as::<_, WebhookJob>(
+            r#"UPDATE webhooks w
+                   SET status = 'Processing'
+                   FROM invoices i
+                   WHERE w.invoice_id = i.id
+                       AND w.id IN (
+                           SELECT id FROM webhooks
+                           WHERE status = 'Pending' AND next_retry <= NOW()
+                           LIMIT $1
+                           FOR UPDATE SKIP LOCKED
+                       )
+                   RETURNING w.id, w.url, w.payload, w.max_retries, w.attempts,
+                       COALESCE(i.webhook_secret, 'default_secret') as secret_key"#
+        )
+            .bind(limit as i64)
+            .fetch_all(&mut *tx)
+            .await?;
+
+        tx.commit().await?;
+        Ok(jobs)
     }
 
-    async fn update_webhook_status(&self, id: &str, status: WebhookStatus) -> anyhow::Result<()> {
-        todo!()
+    async fn update_webhook_status(&self, webhook_id: Uuid, status: WebhookStatus) -> anyhow::Result<()> {
+        sqlx::query(
+            "UPDATE webhooks SET status = $1 WHERE id = $2"
+        )
+            .bind(status.to_string())
+            .bind(webhook_id)
+            .execute(&self.pool)
+            .await?;
+
+        Ok(())
     }
 
-    async fn schedule_webhook_retry(&self, id: &str, attempts: i32, next_retry: DateTime<Utc>) -> anyhow::Result<()> {
-        todo!()
+    async fn schedule_webhook_retry(&self, webhook_id: Uuid, attempts: i32, next_retry: DateTime<Utc>) -> anyhow::Result<()> {
+        sqlx::query(
+            r#"UPDATE webhooks SET status = 'Pending', attempts = $1,
+                       next_retry = $2 WHERE id = $3"#
+        )
+            .bind(attempts)
+            .bind(next_retry)
+            .bind(webhook_id)
+            .execute(&self.pool)
+            .await?;
+
+        Ok(())
     }
 }
 
