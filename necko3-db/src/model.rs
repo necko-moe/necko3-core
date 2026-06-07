@@ -2,11 +2,12 @@ use alloy_primitives::{TxHash, U256};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use sqlx::types::Json;
-use std::collections::HashSet;
 use strum::{AsRefStr, Display, EnumString};
 
 #[derive(Debug, Clone, Eq, Hash, PartialEq, Deserialize, Serialize)]
 pub struct TokenConfig {
+    pub id: i32,
+    pub chain_id: i32,
     pub symbol: String,
     pub contract: String,
     pub decimals: u8,
@@ -15,6 +16,7 @@ pub struct TokenConfig {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ChainConfig {
+    pub id: i32,
     pub name: String,
     pub active: bool,
     pub rpc_urls: Vec<String>,
@@ -26,7 +28,6 @@ pub struct ChainConfig {
     pub block_lag: u8,
     pub required_confirmations: u64,
     pub logo_url: Option<String>,
-    pub tokens: HashSet<TokenConfig>,
 }
 
 impl ChainConfig {

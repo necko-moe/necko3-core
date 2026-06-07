@@ -1,3 +1,4 @@
+use alloy_primitives::U256;
 use crate::model::{ExpiredInvoiceInfo, Invoice, InvoiceFilter, InvoiceStatus, PaginatedVec};
 use async_trait::async_trait;
 
@@ -10,4 +11,9 @@ pub trait InvoiceStore: Sync + Send {
     async fn update_invoice_status(&self, uuid: &str, status: InvoiceStatus) -> anyhow::Result<()>;
     async fn get_pending_invoice_by_address(&self, chain_name: &str, address: &str) -> anyhow::Result<Option<Invoice>>;
     async fn expire_old_invoices(&self) -> anyhow::Result<Vec<ExpiredInvoiceInfo>>;
+
+    async fn update_invoice_paid(&self, id: &str, paid_raw: U256, paid: &str, new_status: Option<InvoiceStatus>) -> anyhow::Result<()>;
+
+    // SELECT address FROM invoices WHERE status = 'Pending' AND network = $1
+    async fn get_watch_addresses(&self, chain_name: &str) -> anyhow::Result<Vec<String>>;
 }

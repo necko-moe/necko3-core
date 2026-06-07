@@ -1,8 +1,11 @@
-use crate::traits::chain::ChainStore;
-use crate::traits::invoice::InvoiceStore;
-use crate::traits::payment::PaymentStore;
-use crate::traits::token::TokenStore;
-use crate::traits::webhook::WebhookStore;
+pub use crate::traits::chain::ChainStore;
+pub use crate::traits::invoice::InvoiceStore;
+pub use crate::traits::payment::PaymentStore;
+pub use crate::traits::token::TokenStore;
+pub use crate::traits::webhook::WebhookStore;
+pub use crate::traits::ext::DatabaseExt;
+
+pub use async_trait::async_trait;
 
 pub mod chain;
 pub mod token;
