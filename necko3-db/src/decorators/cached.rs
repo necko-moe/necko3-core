@@ -1,27 +1,34 @@
-use std::collections::HashMap;
-use std::sync::Arc;
+use crate::model::{ChainData, ExpiredInvoiceInfo, Invoice, InvoiceFilter, InvoiceStatus, PaginatedVec, PartialChainUpdate, Payment, PaymentFilter, PaymentStatus, TokenData, Webhook, WebhookFilter, WebhookJob, WebhookStatus};
+use crate::traits::{ChainStore, DatabaseExt, InvoiceStore, PaymentStore, TokenStore, WebhookStore, XPubStore};
 use alloy_primitives::U256;
 use arc_swap::{ArcSwap, ArcSwapOption};
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
+use dashmap::DashMap;
+use std::collections::HashMap;
+use std::sync::Arc;
 use uuid::Uuid;
-use crate::model::{ChainConfig, ExpiredInvoiceInfo, Invoice, InvoiceFilter, InvoiceStatus, PaginatedVec, PartialChainUpdate, Payment, PaymentFilter, PaymentStatus, TokenConfig, Webhook, WebhookFilter, WebhookJob, WebhookStatus};
-use crate::traits::{ChainStore, DatabaseExt, InvoiceStore, PaymentStore, TokenStore, WebhookStore, XPubStore};
 
 pub struct CachedDb<D> {
     inner: Arc<D>,
 
-    chains_cache: ArcSwapOption<HashMap<String, ChainConfig>>,
+    chains_cache: ArcSwapOption<HashMap<String, ChainData>>,
     tokens_cache: ArcSwap<TokenCacheState>,
+
+    token_decimals: DashMap<(String, String), u8>,
+
+    chain_blocks_cache: DashMap<String, u64>,
 }
 
 #[derive(Default, Clone)]
 struct TokenCacheState {
-    by_chain: HashMap<String, Arc<HashMap<String, TokenConfig>>>,
+    by_chain: HashMap<String, Arc<HashMap<String, TokenData>>>,
 
-    by_id: HashMap<i32, Arc<TokenConfig>>,
+    by_id: HashMap<i32, Arc<TokenData>>,
 
-    by_symbol: HashMap<String, Vec<Arc<TokenConfig>>>,
+    by_contract: HashMap<String, Arc<TokenData>>,
+
+    by_symbol: HashMap<String, Vec<Arc<TokenData>>>,
 }
 
 impl<D> CachedDb<D> {
@@ -30,6 +37,8 @@ impl<D> CachedDb<D> {
             inner,
             chains_cache: ArcSwapOption::empty(),
             tokens_cache: ArcSwap::default(),
+            token_decimals: DashMap::default(),
+            chain_blocks_cache: DashMap::new(),
         }
     }
 
@@ -39,23 +48,26 @@ impl<D> CachedDb<D> {
 }
 
 impl<D: DatabaseExt> CachedDb<D> {
-    async fn store_chains_cache(&self) -> anyhow::Result<Vec<ChainConfig>> {
+    async fn store_chains_cache(&self) -> anyhow::Result<Vec<ChainData>> {
         let chains = self.inner.get_chains().await?;
 
-        let chains_cache: HashMap<String, ChainConfig> = chains
+        let chains_cache: HashMap<String, ChainData> = chains
             .clone()
             .into_iter()
-            .map(|c| (c.name.clone(), c))
+            .map(|c| {
+                self.chain_blocks_cache.insert(c.name.clone(), c.last_processed_block);
+                (c.name.clone(), c)
+            })
             .collect();
-        self.chains_cache.store(Some(Arc::new(chains_cache)));
 
+        self.chains_cache.store(Some(Arc::new(chains_cache)));
         Ok(chains)
     }
 
-    async fn store_tokens_cache(&self, chain_name: &str) -> anyhow::Result<Vec<TokenConfig>> {
+    async fn store_tokens_cache(&self, chain_name: &str) -> anyhow::Result<Vec<TokenData>> {
         let tokens = self.inner.get_tokens(chain_name).await?;
 
-        let tokens_map: HashMap<String, TokenConfig> = tokens
+        let tokens_map: HashMap<String, TokenData> = tokens
             .clone()
             .into_iter()
             .map(|c| (c.symbol.clone(), c))
@@ -72,6 +84,8 @@ impl<D: DatabaseExt> CachedDb<D> {
                 for token in old_chain_tokens.values() {
                     new_state.by_id.remove(&token.id);
 
+                    new_state.by_contract.remove(&token.contract);
+
                     if let Some(sym_list) = new_state.by_symbol.get_mut(&token.symbol) {
                         sym_list.retain(|t| t.id != token.id);
                     }
@@ -86,12 +100,15 @@ impl<D: DatabaseExt> CachedDb<D> {
             }
 
             for token in tokens.iter() {
-                new_state.by_id.insert(token.id, Arc::new(token.clone()));
+                let token = Arc::new(token.clone());
+                new_state.by_id.insert(token.id, token.clone());
+
+                new_state.by_contract.insert(token.contract.clone(), token.clone());
 
                 new_state.by_symbol
                     .entry(token.symbol.clone())
                     .or_default()
-                    .push(Arc::new(token.clone()));
+                    .push(token.clone());
             }
 
             Arc::new(new_state)
@@ -107,6 +124,8 @@ impl<D: DatabaseExt> CachedDb<D> {
             if let Some(removed_chain_tokens) = new_state.by_chain.remove(chain_name) {
                 for token in removed_chain_tokens.values() {
                     new_state.by_id.remove(&token.id);
+
+                    new_state.by_contract.remove(&token.contract);
 
                     if let Some(sym_list) = new_state.by_symbol.get_mut(&token.symbol) {
                         sym_list.retain(|t| t.id != token.id);
@@ -130,7 +149,7 @@ impl<D: DatabaseExt> CachedDb<D> {
 
 #[async_trait]
 impl<D: DatabaseExt> ChainStore for CachedDb<D> {
-    async fn get_chains(&self) -> anyhow::Result<Vec<ChainConfig>> {
+    async fn get_chains(&self) -> anyhow::Result<Vec<ChainData>> {
         let guard = self.chains_cache.load();
         if let Some(ref chains_cache) = *guard {
             return Ok(chains_cache.values().cloned().collect());
@@ -139,7 +158,7 @@ impl<D: DatabaseExt> ChainStore for CachedDb<D> {
         self.store_chains_cache().await
     }
 
-    async fn get_chain(&self, chain_name: &str) -> anyhow::Result<Option<ChainConfig>> {
+    async fn get_chain(&self, chain_name: &str) -> anyhow::Result<Option<ChainData>> {
         let guard = self.chains_cache.load();
         if let Some(ref chains_cache) = *guard {
             return Ok(chains_cache.get(chain_name).cloned());
@@ -150,7 +169,7 @@ impl<D: DatabaseExt> ChainStore for CachedDb<D> {
         Ok(chains.into_iter().find(|c| c.name == chain_name))
     }
 
-    async fn get_chain_by_id(&self, id: i32) -> anyhow::Result<Option<ChainConfig>> {
+    async fn get_chain_by_id(&self, id: i32) -> anyhow::Result<Option<ChainData>> {
         let guard = self.chains_cache.load();
         if let Some(ref chains_cache) = *guard {
             return Ok(chains_cache.values()
@@ -163,9 +182,14 @@ impl<D: DatabaseExt> ChainStore for CachedDb<D> {
         Ok(chains.into_iter().find(|c| c.id == id))
     }
 
-    async fn add_chain(&self, chain_config: &ChainConfig) -> anyhow::Result<()> {
+    async fn add_chain(&self, chain_config: &ChainData) -> anyhow::Result<()> {
         self.inner.add_chain(chain_config).await?;
+
         self.chains_cache.store(None);
+
+        self.token_decimals
+            .insert((chain_config.name.clone(), chain_config.native_symbol.clone()), chain_config.decimals);
+
         Ok(())
     }
 
@@ -174,6 +198,8 @@ impl<D: DatabaseExt> ChainStore for CachedDb<D> {
 
         if removed {
             self.chains_cache.store(None);
+            self.token_decimals
+                .retain(|(chain, _token), _| chain != chain_name);
         }
 
         Ok(removed)
@@ -204,14 +230,14 @@ impl<D: DatabaseExt> ChainStore for CachedDb<D> {
 
     async fn update_chain_block(&self, chain_name: &str, block_num: u64) -> anyhow::Result<()> {
         self.inner.update_chain_block(chain_name, block_num).await?;
-        self.chains_cache.store(None);
+        self.chain_blocks_cache.insert(chain_name.to_string(), block_num);
         Ok(())
     }
 }
 
 #[async_trait]
 impl<D: DatabaseExt> TokenStore for CachedDb<D> {
-    async fn get_tokens(&self, chain_name: &str) -> anyhow::Result<Vec<TokenConfig>> {
+    async fn get_tokens(&self, chain_name: &str) -> anyhow::Result<Vec<TokenData>> {
         let token_cache = self.tokens_cache.load();
         if let Some(tokens_map) = token_cache.by_chain.get(chain_name) {
             return Ok(tokens_map.values()
@@ -222,7 +248,7 @@ impl<D: DatabaseExt> TokenStore for CachedDb<D> {
         self.store_tokens_cache(chain_name).await
     }
 
-    async fn get_token(&self, chain_name: &str, token_symbol: &str) -> anyhow::Result<Option<TokenConfig>> {
+    async fn get_token(&self, chain_name: &str, token_symbol: &str) -> anyhow::Result<Option<TokenData>> {
         let tokens_cache = self.tokens_cache.load();
         if let Some(tokens_map) = tokens_cache.by_chain.get(chain_name) {
             return Ok(tokens_map.get(token_symbol).cloned());
@@ -233,32 +259,28 @@ impl<D: DatabaseExt> TokenStore for CachedDb<D> {
         Ok(tokens.into_iter().find(|t| t.symbol == token_symbol))
     }
 
-    async fn get_token_by_id(&self, id: i32) -> anyhow::Result<Option<TokenConfig>> {
+    async fn get_token_by_id(&self, id: i32) -> anyhow::Result<Option<TokenData>> {
         let tokens_cache = self.tokens_cache.load();
-        if let Some(tokens_cache) = tokens_cache.by_id.get(&id) {
-            return Ok(Some((**tokens_cache).clone()))
+        if let Some(token) = tokens_cache.by_id.get(&id) {
+            return Ok(Some((**token).clone()))
         }
 
         self.inner.get_token_by_id(id).await
     }
 
-    async fn get_token_by_contract(&self, chain_name: &str, contract_address: &str) -> anyhow::Result<Option<TokenConfig>> {
+    async fn get_token_by_contract(&self, contract_address: &str) -> anyhow::Result<Option<TokenData>> {
         let tokens_cache = self.tokens_cache.load();
-        if let Some(tokens_map) = tokens_cache.by_chain.get(chain_name) {
-            return Ok(tokens_map.values()
-                .find(|t| t.contract == contract_address)
-                .cloned())
+        if let Some(token) = tokens_cache.by_contract.get(contract_address) {
+            return Ok(Some((**token).clone()))
         }
 
-        let tokens = self.store_tokens_cache(chain_name).await?;
-
-        Ok(tokens.into_iter().find(|t| t.contract == contract_address))
+        self.inner.get_token_by_contract(contract_address).await
     }
 
-    async fn get_tokens_with_symbol(&self, token_symbol: &str) -> anyhow::Result<Vec<TokenConfig>> {
+    async fn get_tokens_with_symbol(&self, token_symbol: &str) -> anyhow::Result<Vec<TokenData>> {
         let tokens_cache = self.tokens_cache.load();
-        if let Some(tokens_cache) = tokens_cache.by_symbol.get(token_symbol) {
-            return Ok(tokens_cache.iter()
+        if let Some(tokens) = tokens_cache.by_symbol.get(token_symbol) {
+            return Ok(tokens.iter()
                 .map(|v| (**v).clone())
                 .collect());
         }
@@ -271,30 +293,56 @@ impl<D: DatabaseExt> TokenStore for CachedDb<D> {
 
         if removed {
             self.invalidate_tokens_cache(chain_name).await?;
+            self.token_decimals
+                .remove(&(chain_name.to_string(), token_symbol.to_string()));
         }
 
         Ok(removed)
     }
 
-    async fn add_token(&self, chain_name: &str, token_config: &TokenConfig) -> anyhow::Result<()> {
+    async fn add_token(&self, chain_name: &str, token_config: &TokenData) -> anyhow::Result<()> {
         self.inner.add_token(chain_name, token_config).await?;
+
         self.invalidate_tokens_cache(chain_name).await?;
+
+        self.token_decimals
+            .insert((chain_name.to_owned(), token_config.symbol.clone()), token_config.decimals);
+
         Ok(())
     }
 
     async fn get_token_decimals(&self, chain_name: &str, token_symbol: &str) -> anyhow::Result<Option<u8>> {
-        let tokens_cache = self.tokens_cache.load();
-        if let Some(tokens_map) = tokens_cache.by_chain.get(chain_name) {
-            return Ok(tokens_map.get(token_symbol)
-                .cloned()
-                .map(|t| t.decimals))
+        if let Some(d) = self.token_decimals
+            .get(&(chain_name.to_string(), token_symbol.to_string())) {
+            return Ok(Some(*d.value()))
         }
 
-        let tokens = self.store_tokens_cache(chain_name).await?;
+        // native
+        let chain_opt = self.get_chain(chain_name).await?;
 
-        Ok(tokens.into_iter()
-            .find(|t| t.symbol == token_symbol)
-            .map(|t| t.decimals))
+        let (native_symbol, native_decimals) = match chain_opt {
+            Some(data) => (data.native_symbol, data.decimals),
+            None => { return Ok(None) }
+        };
+
+        self.token_decimals
+            .insert((chain_name.to_owned(), native_symbol.clone()), native_decimals);
+
+        if native_symbol == token_symbol {
+            return Ok(Some(native_decimals));
+        }
+
+        // token
+        let token_opt = self.get_token(chain_name, token_symbol).await?;
+
+        if let Some(token) = token_opt {
+            self.token_decimals
+                .insert((chain_name.to_owned(), token_symbol.to_owned()), token.decimals);
+
+            return Ok(Some(token.decimals))
+        }
+
+        Ok(None)
     }
 }
 
@@ -328,7 +376,7 @@ impl<D: DatabaseExt> InvoiceStore for CachedDb<D> {
         self.inner.update_invoice_paid(invoice_id, paid_raw, new_status).await
     }
 
-    // maybe I should cache this too
+    // todo maybe I should cache this too
     async fn get_watch_addresses(&self, chain_name: &str) -> anyhow::Result<Vec<String>> {
         self.inner.get_watch_addresses(chain_name).await
     }
@@ -396,4 +444,8 @@ impl<D: DatabaseExt> XPubStore for CachedDb<D> {
 }
 
 #[async_trait]
-impl<D: DatabaseExt> DatabaseExt for CachedDb<D> {}
+impl<D: DatabaseExt> DatabaseExt for CachedDb<D> {
+    async fn get_latest_block(&self, chain_name: &str) -> anyhow::Result<Option<u64>> {
+        Ok(self.chain_blocks_cache.get(chain_name).map(|x| *x.value()))
+    }
+}

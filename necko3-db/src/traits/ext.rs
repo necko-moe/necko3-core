@@ -1,4 +1,4 @@
-use crate::model::{ChainConfig, InvoiceStatus, PaymentStatus, Webhook, WebhookEvent, WebhookStatus};
+use crate::model::{ChainData, InvoiceStatus, PaymentStatus, Webhook, WebhookEvent, WebhookStatus};
 use crate::traits::DatabaseAdapter;
 use async_trait::async_trait;
 use chrono::Utc;
@@ -8,7 +8,7 @@ use uuid::Uuid;
 #[async_trait]
 pub trait DatabaseExt: DatabaseAdapter {
     // chain
-    async fn get_chains_with_token(&self, token_symbol: &str) -> anyhow::Result<Vec<ChainConfig>> {
+    async fn get_chains_with_token(&self, token_symbol: &str) -> anyhow::Result<Vec<ChainData>> {
         let chains = self.get_chains().await?;
         let tokens = self.get_tokens_with_symbol(token_symbol).await?;
 

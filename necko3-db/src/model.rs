@@ -1,13 +1,13 @@
-use alloy_primitives::{TxHash, U256};
+use alloy_primitives::U256;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-use sqlx::FromRow;
 use sqlx::types::Json;
+use sqlx::FromRow;
 use strum::{AsRefStr, Display, EnumString};
 use uuid::Uuid;
 
 #[derive(Debug, Clone, Eq, Hash, PartialEq, Deserialize, Serialize)]
-pub struct TokenConfig {
+pub struct TokenData {
     pub id: i32,
     pub chain_id: i32,
     pub symbol: String,
@@ -17,7 +17,7 @@ pub struct TokenConfig {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ChainConfig {
+pub struct ChainData {
     pub id: i32,
     pub name: String,
     pub active: bool,
@@ -32,7 +32,7 @@ pub struct ChainConfig {
     pub logo_url: Option<String>,
 }
 
-impl ChainConfig {
+impl ChainData {
     pub fn patch(&mut self, update: &PartialChainUpdate) {
         if let Some(x) = &update.rpc_urls { self.rpc_urls = x.to_owned(); }
         if let Some(x) = update.last_processed_block { self.last_processed_block = x; }
@@ -65,20 +65,6 @@ pub struct Payment {
 #[strum(serialize_all = "UPPERCASE")]
 pub enum ChainType {
     EVM
-}
-
-#[derive(Debug, Clone)]
-pub struct PaymentEvent {
-    pub network: String,
-    pub tx_hash: TxHash,
-    pub from: String,
-    pub to: String,
-    pub token: String,
-    pub amount: String,
-    pub amount_raw: U256,
-    pub decimals: u8,
-    pub block_number: u64,
-    pub log_index: Option<u64>,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq,
@@ -263,4 +249,10 @@ pub struct ExpiredInvoiceInfo {
     pub id: Uuid,
     pub network: String,
     pub address: String,
+}
+
+impl ExpiredInvoiceInfo {
+    pub fn new(id: Uuid, network: String, address: String) -> Self {
+        Self { id, network, address }
+    }
 }

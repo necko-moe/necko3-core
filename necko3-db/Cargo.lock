@@ -1518,7 +1518,7 @@ dependencies = [
 
 [[package]]
 name = "necko3-db"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "alloy-primitives",
  "anyhow",
@@ -1526,6 +1526,7 @@ dependencies = [
  "async-trait",
  "chrono",
  "dashmap",
+ "parking_lot",
  "serde",
  "serde_json",
  "sqlx",

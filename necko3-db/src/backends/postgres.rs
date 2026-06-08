@@ -1,10 +1,9 @@
-use crate::model::{ChainConfig, ChainType, ExpiredInvoiceInfo, Invoice, InvoiceFilter, InvoiceStatus, PaginatedVec, PartialChainUpdate, Payment, PaymentFilter, PaymentStatus, TokenConfig, Webhook, WebhookEvent, WebhookFilter, WebhookJob, WebhookStatus};
+use crate::model::{ChainData, ChainType, ExpiredInvoiceInfo, Invoice, InvoiceFilter, InvoiceStatus, PaginatedVec, PartialChainUpdate, Payment, PaymentFilter, PaymentStatus, TokenData, Webhook, WebhookEvent, WebhookFilter, WebhookJob, WebhookStatus};
 use crate::traits::*;
 use alloy_primitives::utils::format_units;
 use alloy_primitives::U256;
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
-use dashmap::DashMap;
 use serde_json::Value;
 use sqlx::postgres::PgRow;
 use sqlx::types::BigDecimal;
@@ -13,10 +12,7 @@ use std::str::FromStr;
 use uuid::Uuid;
 
 pub struct PostgresDatabase {
-    pool: PgPool,
-
-    // no cache here
-    token_decimals: DashMap<(String, String), u8>,
+    pool: PgPool
 }
 
 impl PostgresDatabase {
@@ -27,10 +23,7 @@ impl PostgresDatabase {
             .execute(&pool)
             .await?;
 
-        Ok(Self {
-            pool,
-            token_decimals: DashMap::new(),
-        })
+        Ok(Self { pool })
     }
 
     pub fn pool(&self) -> &PgPool {
@@ -39,12 +32,12 @@ impl PostgresDatabase {
 
     fn map_row_to_chain(
         row: PgRow,
-    ) -> anyhow::Result<ChainConfig> {
+    ) -> anyhow::Result<ChainData> {
         let chain_str: String = row.get("chain_type");
         let chain_type: ChainType = chain_str.parse()
             .map_err(|e| anyhow::anyhow!("Invalid chain type: {}", e))?;
 
-        Ok(ChainConfig {
+        Ok(ChainData {
             id: row.get("id"),
             name: row.get("name"),
             active: row.get("active"),
@@ -62,8 +55,8 @@ impl PostgresDatabase {
 
     fn map_row_to_token(
         row: PgRow,
-    ) -> TokenConfig {
-        TokenConfig {
+    ) -> TokenData {
+        TokenData {
             id: row.get("id"),
             chain_id: row.get("chain_id"),
             symbol: row.get("symbol"),
@@ -172,7 +165,7 @@ impl PostgresDatabase {
 
 #[async_trait]
 impl ChainStore for PostgresDatabase {
-    async fn get_chains(&self) -> anyhow::Result<Vec<ChainConfig>> {
+    async fn get_chains(&self) -> anyhow::Result<Vec<ChainData>> {
         let rows = sqlx::query(
             r#"SELECT * FROM chains"#
         )
@@ -184,7 +177,7 @@ impl ChainStore for PostgresDatabase {
             .collect()
     }
 
-    async fn get_chain(&self, chain_name: &str) -> anyhow::Result<Option<ChainConfig>> {
+    async fn get_chain(&self, chain_name: &str) -> anyhow::Result<Option<ChainData>> {
         let row = sqlx::query(
             r#"SELECT * FROM chains WHERE name = $1"#
         )
@@ -195,7 +188,7 @@ impl ChainStore for PostgresDatabase {
         row.map(Self::map_row_to_chain).transpose()
     }
 
-    async fn get_chain_by_id(&self, id: i32) -> anyhow::Result<Option<ChainConfig>> {
+    async fn get_chain_by_id(&self, id: i32) -> anyhow::Result<Option<ChainData>> {
         let row = sqlx::query(
             r#"SELECT * FROM chains WHERE id = $1"#
         )
@@ -206,7 +199,7 @@ impl ChainStore for PostgresDatabase {
         row.map(Self::map_row_to_chain).transpose()
     }
 
-    async fn add_chain(&self, chain_config: &ChainConfig) -> anyhow::Result<()> {
+    async fn add_chain(&self, chain_config: &ChainData) -> anyhow::Result<()> {
         sqlx::query(
             r#"INSERT INTO chains
                     (name, rpc_urls, chain_type, xpub, native_symbol, decimals,
@@ -227,9 +220,6 @@ impl ChainStore for PostgresDatabase {
             .execute(&self.pool)
             .await?;
 
-        self.token_decimals
-            .insert((chain_config.name.clone(), chain_config.native_symbol.clone()), chain_config.decimals);
-
         Ok(())
     }
 
@@ -241,13 +231,7 @@ impl ChainStore for PostgresDatabase {
             .execute(&self.pool)
             .await?;
 
-        let deleted = result.rows_affected() > 0;
-        if deleted {
-            self.token_decimals
-                .retain(|(chain, _token), _| chain != chain_name);
-        }
-
-        Ok(deleted)
+        Ok(result.rows_affected() > 0)
     }
 
     async fn chain_exists(&self, chain_name: &str) -> anyhow::Result<bool> {
@@ -326,7 +310,7 @@ impl ChainStore for PostgresDatabase {
 
 #[async_trait]
 impl TokenStore for PostgresDatabase {
-    async fn get_tokens(&self, chain_name: &str) -> anyhow::Result<Vec<TokenConfig>> {
+    async fn get_tokens(&self, chain_name: &str) -> anyhow::Result<Vec<TokenData>> {
         let rows = sqlx::query(
             r#"SELECT t.*
                    FROM tokens t
@@ -342,7 +326,7 @@ impl TokenStore for PostgresDatabase {
             .collect())
     }
 
-    async fn get_token(&self, chain_name: &str, token_symbol: &str) -> anyhow::Result<Option<TokenConfig>> {
+    async fn get_token(&self, chain_name: &str, token_symbol: &str) -> anyhow::Result<Option<TokenData>> {
         let row = sqlx::query(
             r#"SELECT t.*
                    FROM tokens t
@@ -357,7 +341,7 @@ impl TokenStore for PostgresDatabase {
         Ok(row.map(Self::map_row_to_token))
     }
 
-    async fn get_token_by_id(&self, id: i32) -> anyhow::Result<Option<TokenConfig>> {
+    async fn get_token_by_id(&self, id: i32) -> anyhow::Result<Option<TokenData>> {
         let row = sqlx::query(
             r#"SELECT * FROM tokens WHERE id = $1"#
         )
@@ -368,14 +352,10 @@ impl TokenStore for PostgresDatabase {
         Ok(row.map(Self::map_row_to_token))
     }
 
-    async fn get_token_by_contract(&self, chain_name: &str, contract_address: &str) -> anyhow::Result<Option<TokenConfig>> {
+    async fn get_token_by_contract(&self, contract_address: &str) -> anyhow::Result<Option<TokenData>> {
         let row = sqlx::query(
-            r#"SELECT t.*
-                   FROM tokens t
-                   JOIN chains c ON t.chain_id = c.id
-                   WHERE c.name = $1 AND t.contract_address = $2"#
+            r#"SELECT * FROM tokens WHERE contract_address = $1"#
         )
-            .bind(chain_name)
             .bind(contract_address)
             .fetch_optional(&self.pool)
             .await?;
@@ -383,7 +363,7 @@ impl TokenStore for PostgresDatabase {
         Ok(row.map(Self::map_row_to_token))
     }
 
-    async fn get_tokens_with_symbol(&self, token_symbol: &str) -> anyhow::Result<Vec<TokenConfig>> {
+    async fn get_tokens_with_symbol(&self, token_symbol: &str) -> anyhow::Result<Vec<TokenData>> {
         let rows = sqlx::query(
             r#"SELECT * FROM tokens WHERE symbol = $1"#
         )
@@ -409,16 +389,10 @@ impl TokenStore for PostgresDatabase {
             .execute(&self.pool)
             .await?;
 
-        let deleted = result.rows_affected() > 0;
-        if deleted {
-            self.token_decimals
-                .remove(&(chain_name.to_string(), token_symbol.to_string()));
-        }
-
-        Ok(deleted)
+        Ok(result.rows_affected() > 0)
     }
 
-    async fn add_token(&self, chain_name: &str, token_config: &TokenConfig) -> anyhow::Result<()> {
+    async fn add_token(&self, chain_name: &str, token_config: &TokenData) -> anyhow::Result<()> {
         let result = sqlx::query(
             r#"INSERT INTO tokens
                (chain_id, symbol, contract_address, decimals, logo_url)
@@ -438,20 +412,12 @@ impl TokenStore for PostgresDatabase {
             anyhow::bail!("Chain {} not found in DB", chain_name)
         }
 
-        self.token_decimals
-            .insert((chain_name.to_owned(), token_config.symbol.clone()), token_config.decimals);
-
         Ok(())
     }
 
     async fn get_token_decimals(&self, chain_name: &str, token_symbol: &str) -> anyhow::Result<Option<u8>> {
-        if let Some(d) = self.token_decimals
-            .get(&(chain_name.to_string(), token_symbol.to_string())) {
-            return Ok(Some(*d.value()))
-        }
-
         // native
-        let native: Option<(String, String, i16)> = sqlx::query_as(
+        let native: Option<(i32, String, i16)> = sqlx::query_as(
             r#"SELECT id, chains.native_symbol, chains.decimals FROM chains WHERE name = $1"#
         )
             .bind(chain_name)
@@ -463,15 +429,12 @@ impl TokenStore for PostgresDatabase {
             None => { return Ok(None) }
         };
 
-        self.token_decimals
-            .insert((chain_name.to_owned(), native_symbol.clone()), native_decimals);
-
         if native_symbol == token_symbol {
             return Ok(Some(native_decimals));
         }
 
         // token
-        let token_decimals_opt: Option<i16> = sqlx::query_scalar(
+        let token_decimals: Option<i16> = sqlx::query_scalar(
             r#"SELECT tokens.decimals FROM tokens WHERE symbol = $1 AND chain_id = $2"#
         )
             .bind(token_symbol)
@@ -479,15 +442,7 @@ impl TokenStore for PostgresDatabase {
             .fetch_optional(&self.pool)
             .await?;
 
-        if let Some(token_decimals) = token_decimals_opt {
-            let token_decimals = token_decimals as u8;
-            self.token_decimals
-                .insert((chain_name.to_owned(), token_symbol.to_owned()), token_decimals);
-
-            return Ok(Some(token_decimals));
-        }
-
-        Ok(None)
+        Ok(token_decimals.map(|dec| dec as u8))
     }
 }
 
@@ -826,7 +781,7 @@ impl PaymentStore for PostgresDatabase {
 
     async fn update_payment_status(&self, payment_id: Uuid, status: PaymentStatus) -> anyhow::Result<()> {
         sqlx::query(
-            "UPDATE webhooks SET status = $1 WHERE id = $2"
+            "UPDATE payments SET status = $1 WHERE id = $2"
         )
             .bind(status.to_string())
             .bind(payment_id)
