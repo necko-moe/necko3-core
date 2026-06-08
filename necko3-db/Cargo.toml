@@ -8,7 +8,9 @@ async-trait = "0.1"
 sqlx = { version = "0.9", features = [
     "runtime-tokio", "tls-rustls", "postgres", "uuid", "chrono", "bigdecimal"] }
 anyhow = "1"
+
 dashmap = "6.2"
+arc-swap = "1.9"
 
 chrono = { version = "0.4", features = ["serde"] }
 uuid = { version = "1.23", features = ["v4", "serde"] }

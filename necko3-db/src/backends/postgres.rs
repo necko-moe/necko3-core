@@ -797,15 +797,16 @@ impl PaymentStore for PostgresDatabase {
         rows.into_iter().map(Self::map_row_to_payment).collect()
     }
 
-    async fn upsert_payment(&self, payment: &Payment) -> anyhow::Result<()> {
+    async fn upsert_payment(&self, payment: &Payment) -> anyhow::Result<bool> {
         let amount_bd = BigDecimal::from_str(&payment.amount_raw.to_string())?;
 
-        sqlx::query(
+        let row = sqlx::query(
             r#"INSERT INTO payments (invoice_id, "from", "to", network, tx_hash, amount_raw,
                       block_number, status, log_index, token)
                    VALUES ($1, $2, $3, $4, $5, $6, $7, 'Confirming', $8, $9)
                    ON CONFLICT (tx_hash, log_index, network)
-                   DO UPDATE SET block_number = excluded.block_number"#
+                   DO UPDATE SET block_number = excluded.block_number
+                   RETURNING (xmax = 0) AS inserted"#
         )
             .bind(payment.invoice_id)
             .bind(&payment.from)
@@ -816,10 +817,11 @@ impl PaymentStore for PostgresDatabase {
             .bind(payment.block_number as i64)
             .bind(payment.log_index as i64)
             .bind(&payment.token)
-            .execute(&self.pool)
+            .fetch_one(&self.pool)
             .await?;
-
-        Ok(())
+        
+        let inserted: bool = row.get("inserted");
+        Ok(inserted)
     }
 
     async fn update_payment_status(&self, payment_id: Uuid, status: PaymentStatus) -> anyhow::Result<()> {
@@ -1017,4 +1019,50 @@ impl XPubStore for PostgresDatabase {
 }
 
 #[async_trait]
-impl DatabaseExt for PostgresDatabase {}
+impl DatabaseExt for PostgresDatabase {
+    async fn finalize_payment(&self, payment_id: Uuid) -> anyhow::Result<bool> {
+        let mut tx = self.pool.begin().await?;
+
+        let row = sqlx::query(
+            "UPDATE payments SET status = 'Confirmed' WHERE id = $1
+                                         RETURNING invoice_id, amount_raw::TEXT"
+        )
+            .bind(payment_id)
+            .fetch_one(&mut *tx)
+            .await?;
+
+        let inv_id: Uuid = row.get("invoice_id");
+
+        let pay_amount_str: String = row.get("amount_raw");
+        let pay_amount_bd = BigDecimal::from_str(&pay_amount_str)?;
+
+        let inv = sqlx::query(
+            r#"UPDATE invoices SET paid_raw = paid_raw + $1 WHERE id = $2
+                   RETURNING paid_raw::TEXT, amount_raw::TEXT"#
+        )
+            .bind(pay_amount_bd)
+            .bind(inv_id)
+            .fetch_one(&mut *tx)
+            .await?;
+
+        let inv_paid_str: String = inv.get("paid_raw");
+        let inv_amount_str: String = inv.get("amount_raw");
+
+        let inv_paid_raw = U256::from_str(&inv_paid_str)
+            .map_err(|e| anyhow::anyhow!("Failed to parse paid_raw: {}", e))?;
+        let inv_amount_raw = U256::from_str(&inv_amount_str)
+            .map_err(|e| anyhow::anyhow!("Failed to parse amount_raw: {}", e))?;
+
+        let is_fully_paid = inv_paid_raw >= inv_amount_raw;
+        if is_fully_paid {
+            sqlx::query("UPDATE invoices SET status = 'Paid' WHERE id = $1")
+                .bind(inv_id)
+                .execute(&mut *tx)
+                .await?;
+        }
+
+        tx.commit().await?;
+
+        Ok(is_fully_paid)
+    }
+}
