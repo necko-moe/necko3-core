@@ -1,6 +1,17 @@
 [package]
 name = "necko3-blockchain"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2024"
 
 [dependencies]
+tokio = { version = "1", features = ["sync"] }
+tracing = "0.1"
+
+coins-bip32 = "0.13"
+alloy = { version = "2.0.5", features = ["full", "reqwest-rustls-tls"] }
+
+async-trait = "0.1"
+anyhow = "1"
+url = "2.5"
+
+necko3-types = { path = "../necko3-types" }
