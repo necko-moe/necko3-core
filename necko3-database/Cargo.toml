@@ -1,5 +1,5 @@
 [package]
-name = "necko3-db"
+name = "necko3-database"
 version = "0.1.2"
 edition = "2024"
 
