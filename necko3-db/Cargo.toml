@@ -1,9 +1,11 @@
 [package]
 name = "necko3-db"
-version = "0.1.1"
+version = "0.1.2"
 edition = "2024"
 
 [dependencies]
+tokio = { version = "1", features = ["sync"] }
+
 async-trait = "0.1"
 sqlx = { version = "0.9", features = [
     "runtime-tokio", "tls-rustls", "postgres", "uuid", "chrono", "bigdecimal"] }

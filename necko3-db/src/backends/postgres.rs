@@ -1,4 +1,4 @@
-use crate::model::{ChainData, ChainType, ExpiredInvoiceInfo, Invoice, InvoiceFilter, InvoiceStatus, PaginatedVec, PartialChainUpdate, Payment, PaymentFilter, PaymentStatus, TokenData, Webhook, WebhookEvent, WebhookFilter, WebhookJob, WebhookStatus};
+use crate::model::{ChainData, ChainType, ExpiredInvoiceInfo, FinalizedPaymentInfo, Invoice, InvoiceFilter, InvoiceStatus, PaginatedVec, PartialChainUpdate, Payment, PaymentFilter, PaymentStatus, TokenData, Webhook, WebhookEvent, WebhookFilter, WebhookJob, WebhookStatus};
 use crate::traits::*;
 use alloy_primitives::utils::format_units;
 use alloy_primitives::U256;
@@ -223,15 +223,15 @@ impl ChainStore for PostgresDatabase {
         Ok(())
     }
 
-    async fn remove_chain(&self, chain_name: &str) -> anyhow::Result<bool> {
+    async fn remove_chain(&self, chain_name: &str) -> anyhow::Result<Option<ChainData>> {
         let result = sqlx::query(
-            "DELETE FROM chains WHERE name = $1"
+            "DELETE FROM chains WHERE name = $1 RETURNING *"
         )
             .bind(chain_name)
-            .execute(&self.pool)
+            .fetch_optional(&self.pool)
             .await?;
 
-        Ok(result.rows_affected() > 0)
+        result.map(Self::map_row_to_chain).transpose()
     }
 
     async fn chain_exists(&self, chain_name: &str) -> anyhow::Result<bool> {
@@ -376,20 +376,21 @@ impl TokenStore for PostgresDatabase {
             .collect())
     }
 
-    async fn remove_token(&self, chain_name: &str, token_symbol: &str) -> anyhow::Result<bool> {
+    async fn remove_token(&self, chain_name: &str, token_symbol: &str) -> anyhow::Result<Option<TokenData>> {
         let result = sqlx::query(
             r#"DELETE FROM tokens t
                    USING chains c
                    WHERE t.chain_id = c.id
                        AND t.symbol = $1
-                       AND c.name = $2"#
+                       AND c.name = $2
+                   RETURNING t.*"#
         )
             .bind(token_symbol)
             .bind(chain_name)
-            .execute(&self.pool)
+            .fetch_optional(&self.pool)
             .await?;
 
-        Ok(result.rows_affected() > 0)
+        Ok(result.map(Self::map_row_to_token))
     }
 
     async fn add_token(&self, chain_name: &str, token_config: &TokenData) -> anyhow::Result<()> {
@@ -605,24 +606,16 @@ impl InvoiceStore for PostgresDatabase {
     async fn update_invoice_paid(&self, invoice_id: Uuid, paid_raw: U256, new_status: Option<InvoiceStatus>) -> anyhow::Result<()> {
         let paid_bd = BigDecimal::from_str(&paid_raw.to_string())?;
 
-        if let Some(status) = new_status {
-            sqlx::query(
-                "UPDATE invoices SET paid_raw = $1, status = $2 WHERE id = $3"
-            )
-                .bind(&paid_bd)
-                .bind(status.to_string())
-                .bind(invoice_id)
-                .execute(&self.pool)
-                .await?;
-        } else {
-            sqlx::query(
-                "UPDATE invoices SET paid_raw = $1 WHERE id = $2"
-            )
-                .bind(&paid_bd)
-                .bind(invoice_id)
-                .execute(&self.pool)
-                .await?;
-        }
+        sqlx::query(
+            r#"UPDATE invoices SET paid_raw = $1,
+                    status = COALESCE($2, status)
+                WHERE id = $3"#
+        )
+            .bind(paid_bd)
+            .bind(new_status.map(|x| x.to_string()))
+            .bind(invoice_id)
+            .execute(&self.pool)
+            .await?;
 
         Ok(())
     }
@@ -758,7 +751,7 @@ impl PaymentStore for PostgresDatabase {
         let row = sqlx::query(
             r#"INSERT INTO payments (invoice_id, "from", "to", network, tx_hash, amount_raw,
                       block_number, status, log_index, token)
-                   VALUES ($1, $2, $3, $4, $5, $6, $7, 'Confirming', $8, $9)
+                   VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
                    ON CONFLICT (tx_hash, log_index, network)
                    DO UPDATE SET block_number = excluded.block_number
                    RETURNING (xmax = 0) AS inserted"#
@@ -770,6 +763,7 @@ impl PaymentStore for PostgresDatabase {
             .bind(&payment.tx_hash)
             .bind(amount_bd)
             .bind(payment.block_number as i64)
+            .bind(payment.status.to_string())
             .bind(payment.log_index as i64)
             .bind(&payment.token)
             .fetch_one(&self.pool)
@@ -904,8 +898,6 @@ impl WebhookStore for PostgresDatabase {
     }
 
     async fn select_pending_webhooks(&self, limit: usize) -> anyhow::Result<Vec<WebhookJob>> {
-        let mut tx = self.pool.begin().await?;
-
         let jobs = sqlx::query_as::<_, WebhookJob>(
             r#"UPDATE webhooks w
                    SET status = 'Processing'
@@ -921,10 +913,9 @@ impl WebhookStore for PostgresDatabase {
                        COALESCE(i.webhook_secret, 'default_secret') as secret_key"#
         )
             .bind(limit as i64)
-            .fetch_all(&mut *tx)
+            .fetch_all(&self.pool)
             .await?;
 
-        tx.commit().await?;
         Ok(jobs)
     }
 
@@ -975,7 +966,7 @@ impl XPubStore for PostgresDatabase {
 
 #[async_trait]
 impl DatabaseExt for PostgresDatabase {
-    async fn finalize_payment(&self, payment_id: Uuid) -> anyhow::Result<bool> {
+    async fn finalize_payment(&self, payment_id: Uuid) -> anyhow::Result<FinalizedPaymentInfo> {
         let mut tx = self.pool.begin().await?;
 
         let row = sqlx::query(
@@ -987,37 +978,50 @@ impl DatabaseExt for PostgresDatabase {
             .await?;
 
         let inv_id: Uuid = row.get("invoice_id");
-
-        let pay_amount_str: String = row.get("amount_raw");
-        let pay_amount_bd = BigDecimal::from_str(&pay_amount_str)?;
+        let pay_amount_bd = BigDecimal::from_str(&row.get::<String, _>("amount_raw"))?;
 
         let inv = sqlx::query(
             r#"UPDATE invoices SET paid_raw = paid_raw + $1 WHERE id = $2
-                   RETURNING paid_raw::TEXT, amount_raw::TEXT"#
+                   RETURNING (paid_raw - $1)::TEXT as old_paid_raw,
+                       paid_raw::TEXT as new_paid_raw,
+                       amount_raw::TEXT,
+                       status"# // could've used OLD.paid_raw and NEW.paid_raw but i wouldn't (sorry pg18)
         )
             .bind(pay_amount_bd)
             .bind(inv_id)
             .fetch_one(&mut *tx)
             .await?;
 
-        let inv_paid_str: String = inv.get("paid_raw");
-        let inv_amount_str: String = inv.get("amount_raw");
-
-        let inv_paid_raw = U256::from_str(&inv_paid_str)
-            .map_err(|e| anyhow::anyhow!("Failed to parse paid_raw: {}", e))?;
-        let inv_amount_raw = U256::from_str(&inv_amount_str)
+        let inv_paid_before = U256::from_str(&inv.get::<String, _>("old_paid_raw"))
+            .map_err(|e| anyhow::anyhow!("Failed to parse old_paid_raw: {}", e))?;
+        let inv_paid_after = U256::from_str(&inv.get::<String, _>("new_paid_raw"))
+            .map_err(|e| anyhow::anyhow!("Failed to parse new_paid_raw: {}", e))?;
+        let inv_amount = U256::from_str(&inv.get::<String, _>("amount_raw"))
             .map_err(|e| anyhow::anyhow!("Failed to parse amount_raw: {}", e))?;
 
-        let is_fully_paid = inv_paid_raw >= inv_amount_raw;
-        if is_fully_paid {
+        let old_status_str: String = inv.get("status");
+        let old_status: InvoiceStatus = old_status_str.parse()
+            .map_err(|e| anyhow::anyhow!("Unknown invoice status '{}' from DB: {}", old_status_str, e))?;
+
+        let is_fully_paid = inv_paid_after >= inv_amount;
+        let new_status = if is_fully_paid {
             sqlx::query("UPDATE invoices SET status = 'Paid' WHERE id = $1")
                 .bind(inv_id)
                 .execute(&mut *tx)
                 .await?;
-        }
+
+            InvoiceStatus::Paid
+        } else { old_status };
 
         tx.commit().await?;
 
-        Ok(is_fully_paid)
+        Ok(FinalizedPaymentInfo {
+            is_fully_paid,
+            invoice_id: inv_id,
+            paid_raw_before: inv_paid_before,
+            paid_raw_after: inv_paid_after,
+            old_invoice_status: old_status,
+            new_invoice_status: new_status,
+        })
     }
 }

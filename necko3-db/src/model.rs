@@ -130,7 +130,7 @@ pub struct Webhook {
     pub created_at: DateTime<Utc>,
 }
 
-#[derive(Debug, sqlx::FromRow)]
+#[derive(Debug, Clone, sqlx::FromRow)]
 pub struct WebhookJob {
     pub id: Uuid,
     pub url: String,
@@ -255,4 +255,14 @@ impl ExpiredInvoiceInfo {
     pub fn new(id: Uuid, network: String, address: String) -> Self {
         Self { id, network, address }
     }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FinalizedPaymentInfo {
+    pub is_fully_paid: bool,
+    pub invoice_id: Uuid,
+    pub paid_raw_before: U256,
+    pub paid_raw_after: U256,
+    pub old_invoice_status: InvoiceStatus,
+    pub new_invoice_status: InvoiceStatus,
 }

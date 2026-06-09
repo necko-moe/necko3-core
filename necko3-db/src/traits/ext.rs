@@ -1,4 +1,4 @@
-use crate::model::{ChainData, InvoiceStatus, PaymentStatus, Webhook, WebhookEvent, WebhookStatus};
+use crate::model::{ChainData, FinalizedPaymentInfo, InvoiceStatus, PaymentStatus, Webhook, WebhookEvent, WebhookStatus};
 use crate::traits::DatabaseAdapter;
 use async_trait::async_trait;
 use chrono::Utc;
@@ -70,7 +70,7 @@ pub trait DatabaseExt: DatabaseAdapter {
     }
 
     // payment
-    async fn finalize_payment(&self, payment_id: Uuid) -> anyhow::Result<bool> {
+    async fn finalize_payment(&self, payment_id: Uuid) -> anyhow::Result<FinalizedPaymentInfo> {
         let payment = self.get_payment(payment_id).await?
             .ok_or_else(|| anyhow::anyhow!("Payment {} not found", payment_id))?;
 
@@ -79,6 +79,8 @@ pub trait DatabaseExt: DatabaseAdapter {
         let invoice = self.get_invoice(payment.invoice_id).await?
             .ok_or_else(|| anyhow::anyhow!("Invoice {} not found", payment.invoice_id))?;
 
+        let old_status = invoice.status;
+        let paid_raw_before = invoice.paid_raw;
         let new_paid_raw = invoice.paid_raw + payment.amount_raw;
 
         let is_fully_paid = new_paid_raw >= invoice.amount_raw;
@@ -88,7 +90,14 @@ pub trait DatabaseExt: DatabaseAdapter {
 
         self.update_invoice_paid(invoice.id, new_paid_raw, new_status).await?;
 
-        Ok(is_fully_paid)
+        Ok(FinalizedPaymentInfo {
+            is_fully_paid,
+            invoice_id: invoice.id,
+            paid_raw_before,
+            paid_raw_after: new_paid_raw,
+            old_invoice_status: old_status,
+            new_invoice_status: new_status.unwrap_or(old_status),
+        })
     }
 
     async fn cancel_payment(&self, payment_id: Uuid) -> anyhow::Result<()> {

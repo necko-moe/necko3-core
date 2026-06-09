@@ -193,10 +193,10 @@ impl<D: DatabaseExt> ChainStore for CachedDb<D> {
         Ok(())
     }
 
-    async fn remove_chain(&self, chain_name: &str) -> anyhow::Result<bool> {
+    async fn remove_chain(&self, chain_name: &str) -> anyhow::Result<Option<ChainData>> {
         let removed = self.inner.remove_chain(chain_name).await?;
 
-        if removed {
+        if removed.is_some() {
             self.chains_cache.store(None);
             self.token_decimals
                 .retain(|(chain, _token), _| chain != chain_name);
@@ -288,10 +288,10 @@ impl<D: DatabaseExt> TokenStore for CachedDb<D> {
         self.inner.get_tokens_with_symbol(token_symbol).await
     }
 
-    async fn remove_token(&self, chain_name: &str, token_symbol: &str) -> anyhow::Result<bool> {
+    async fn remove_token(&self, chain_name: &str, token_symbol: &str) -> anyhow::Result<Option<TokenData>> {
         let removed = self.inner.remove_token(chain_name, token_symbol).await?;
 
-        if removed {
+        if removed.is_some() {
             self.invalidate_tokens_cache(chain_name).await?;
             self.token_decimals
                 .remove(&(chain_name.to_string(), token_symbol.to_string()));

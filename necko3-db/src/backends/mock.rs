@@ -57,10 +57,9 @@ impl ChainStore for MockDatabase {
         Ok(())
     }
 
-    async fn remove_chain(&self, chain_name: &str) -> anyhow::Result<bool> {
+    async fn remove_chain(&self, chain_name: &str) -> anyhow::Result<Option<ChainData>> {
         let deleted = self.chains.write()
-            .remove(chain_name)
-            .is_some();
+            .remove(chain_name);
 
         Ok(deleted)
     }
@@ -141,11 +140,10 @@ impl TokenStore for MockDatabase {
             .collect())
     }
 
-    async fn remove_token(&self, chain_name: &str, token_symbol: &str) -> anyhow::Result<bool> {
+    async fn remove_token(&self, chain_name: &str, token_symbol: &str) -> anyhow::Result<Option<TokenData>> {
         let deleted = self.tokens.write()
             .get_mut(chain_name)
-            .and_then(|c| c.remove(token_symbol))
-            .is_some();
+            .and_then(|c| c.remove(token_symbol));
 
         Ok(deleted)
     }
