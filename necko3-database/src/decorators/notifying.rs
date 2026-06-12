@@ -17,6 +17,8 @@ pub enum DbEvent {
     ChainPartialUpdated { chain_name: String, partial_update: PartialChainUpdate },
     ChainActiveUpdated { chain_name: String, active: bool },
     ChainBlockUpdated { chain_name: String, block_number: u64 },
+    ChainWatchAddressAdded { chain_name: String, address: String },
+    ChainWatchAddressRemoved { chain_name: String, addresses: Vec<String> },
 
     TokenAdded { token_data: TokenData },
     TokenRemoved { token_data: TokenData },
@@ -124,6 +126,39 @@ impl<D: DatabaseExt> ChainStore for NotifyingDb<D> {
 
         Ok(())
     }
+
+    async fn add_watch_address(&self, chain_name: &str, address: String) -> anyhow::Result<bool> {
+        let added = self.inner.add_watch_address(chain_name, address.clone()).await?;
+
+        let _ = self.tx.send(DbEvent::ChainWatchAddressAdded {
+            chain_name: chain_name.to_string(),
+            address
+        }).await;
+
+        Ok(added)
+    }
+
+    async fn remove_watch_address(&self, chain_name: &str, address: &str) -> anyhow::Result<bool> {
+        let removed = self.inner.remove_watch_address(chain_name, address).await?;
+
+        let _ = self.tx.send(DbEvent::ChainWatchAddressRemoved {
+            chain_name: chain_name.to_string(),
+            addresses: vec![address.to_string()],
+        }).await;
+
+        Ok(removed)
+    }
+
+    async fn remove_watch_addresses(&self, chain_name: &str, addresses: &[String]) -> anyhow::Result<Vec<String>> {
+        let removed = self.inner.remove_watch_addresses(chain_name, addresses).await?;
+
+        let _ = self.tx.send(DbEvent::ChainWatchAddressRemoved {
+            chain_name: chain_name.to_string(),
+            addresses: removed.clone(),
+        }).await;
+
+        Ok(removed)
+    }
 }
 
 #[async_trait]
@@ -206,8 +241,8 @@ impl<D: DatabaseExt> InvoiceStore for NotifyingDb<D> {
         Ok(())
     }
 
-    async fn get_pending_invoice_by_address(&self, chain_name: &str, address: &str) -> anyhow::Result<Option<Invoice>> {
-        self.inner.get_pending_invoice_by_address(chain_name, address).await
+    async fn get_invoice_by_address(&self, address: &str) -> anyhow::Result<Option<Invoice>> {
+        self.inner.get_invoice_by_address(address).await
     }
 
     async fn expire_old_invoices(&self) -> anyhow::Result<Vec<ExpiredInvoiceInfo>> {
@@ -237,10 +272,6 @@ impl<D: DatabaseExt> InvoiceStore for NotifyingDb<D> {
         }).await;
 
         Ok(())
-    }
-
-    async fn get_watch_addresses(&self, chain_name: &str) -> anyhow::Result<Vec<String>> {
-        self.inner.get_watch_addresses(chain_name).await
     }
 }
 

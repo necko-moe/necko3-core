@@ -1,6 +1,6 @@
 [package]
 name = "necko3-blockchain"
-version = "0.1.1"
+version = "0.1.2"
 edition = "2024"
 
 [dependencies]
@@ -10,8 +10,13 @@ tracing = "0.1"
 coins-bip32 = "0.13"
 alloy = { version = "2.0.5", features = ["full", "reqwest-rustls-tls"] }
 
+tower = "0.5"
+reqwest = "0.13.4"
+
 async-trait = "0.1"
 anyhow = "1"
 url = "2.5"
+
+arc-swap = "1.9"
 
 necko3-types = { path = "../necko3-types" }

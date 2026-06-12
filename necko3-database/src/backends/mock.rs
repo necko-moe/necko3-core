@@ -10,6 +10,7 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use uuid::Uuid;
 
+#[derive(Default)]
 pub struct MockDatabase {
     chains: RwLock<HashMap<String, ChainData>>,
     tokens: RwLock<HashMap<String, HashMap<String, TokenData>>>,
@@ -23,14 +24,7 @@ pub struct MockDatabase {
 
 impl MockDatabase {
     pub fn new() -> Self {
-        Self {
-            chains: Default::default(),
-            tokens: Default::default(),
-            invoices: Default::default(),
-            payments: Default::default(),
-            webhooks: Default::default(),
-            xpub_states: Default::default(),
-        }
+        Default::default()
     }
 }
 
@@ -98,6 +92,40 @@ impl ChainStore for MockDatabase {
         }
 
         Ok(())
+    }
+
+    async fn add_watch_address(&self, chain_name: &str, address: String) -> anyhow::Result<bool> {
+        if let Some(chain) = self.chains.write()
+            .get_mut(chain_name)
+        {
+            let added = chain.watch_addresses.insert(address);
+            
+            Ok(added)
+        } else { Ok(false) }
+    }
+
+    async fn remove_watch_address(&self, chain_name: &str, address: &str) -> anyhow::Result<bool> {
+        if let Some(chain) = self.chains.write()
+            .get_mut(chain_name)
+        {
+            Ok(chain.watch_addresses.remove(address))
+        } else { Ok(false) }
+    }
+
+    async fn remove_watch_addresses(&self, chain_name: &str, addresses: &[String]) -> anyhow::Result<Vec<String>> {
+        if let Some(chain) = self.chains.write()
+            .get_mut(chain_name)
+        {
+            let mut removed = Vec::new();
+
+            for address in addresses {
+                if chain.watch_addresses.remove(address) {
+                    removed.push(address.clone());
+                }
+            }
+
+            Ok(removed)
+        } else { Ok(vec![]) }
     }
 }
 
@@ -233,14 +261,12 @@ impl InvoiceStore for MockDatabase {
         Ok(())
     }
 
-    async fn get_pending_invoice_by_address(&self, chain_name: &str, address: &str) -> anyhow::Result<Option<Invoice>> {
+    async fn get_invoice_by_address(&self, address: &str) -> anyhow::Result<Option<Invoice>> {
         Ok(self.invoices.iter()
             .find(|x| {
                 let inv = x.value();
 
-                inv.network == chain_name
-                    && inv.address == address
-                    && inv.status == InvoiceStatus::Pending
+                inv.address == address
             })
             .map(|x| x.value().clone()))
     }
@@ -251,6 +277,7 @@ impl InvoiceStore for MockDatabase {
         let expired_ids: Vec<Uuid> = self.invoices.iter()
             .filter(|x| {
                 let inv = x.value();
+
                 inv.status == InvoiceStatus::Pending && inv.expires_at <= now
             })
             .map(|entry| entry.key().clone())
@@ -283,18 +310,6 @@ impl InvoiceStore for MockDatabase {
 
         Ok(())
     }
-
-    async fn get_watch_addresses(&self, chain_name: &str) -> anyhow::Result<Vec<String>> {
-        Ok(self.invoices.iter()
-            .filter(|x| {
-                let inv = x.value();
-
-                inv.status == InvoiceStatus::Pending
-                    && inv.network == chain_name
-            })
-            .map(|x| x.value().address.clone())
-            .collect())
-    }
 }
 
 #[async_trait]
@@ -304,8 +319,7 @@ impl PaymentStore for MockDatabase {
             .filter(|kv| {
                 let pay = kv.value();
 
-                filter.invoice_id.as_ref().map_or(true, |i| pay.invoice_id == *i)
-                    && filter.from.as_ref().map_or(true, |f| pay.from == *f)
+                filter.from.as_ref().map_or(true, |f| pay.from == *f)
                     && filter.to.as_ref().map_or(true, |t| pay.to == *t)
                     && filter.network.as_ref().map_or(true, |n| pay.network == *n)
                     && filter.token.as_ref().map_or(true, |t| pay.token == *t)

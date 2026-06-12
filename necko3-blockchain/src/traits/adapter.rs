@@ -5,10 +5,10 @@ use crate::traits::worker::BlockchainWorker;
 
 #[async_trait]
 pub trait BlockchainAdapter: Send + Sync {
-    fn with_rpc_urls(rpc_urls: Vec<String>) -> Self;
-    fn with_rpc_url(rpc_url: String) -> Self;
+    fn with_rpc_urls(rpc_urls: Vec<String>) -> anyhow::Result<Self> where Self: Sized;
+    fn with_rpc_url(rpc_url: String) -> anyhow::Result<Self> where Self: Sized;
 
-    fn derive_address(&self, xpub: String, index: u32) -> anyhow::Result<String>;
+    fn derive_address(xpub: String, index: u32) -> anyhow::Result<String>;
     async fn get_tx_block_number(&self, tx_hash: &str) -> anyhow::Result<Option<u64>>;
 
     fn build_worker(

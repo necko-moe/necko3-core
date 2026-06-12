@@ -5,7 +5,7 @@ use arc_swap::{ArcSwap, ArcSwapOption};
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use dashmap::DashMap;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use uuid::Uuid;
 
@@ -17,6 +17,7 @@ pub struct CachedDb<D> {
 
     token_decimals: DashMap<(String, String), u8>,
 
+    watch_addresses_cache: DashMap<String, HashSet<String>>,
     chain_blocks_cache: DashMap<String, u64>,
 }
 
@@ -38,6 +39,7 @@ impl<D> CachedDb<D> {
             chains_cache: ArcSwapOption::empty(),
             tokens_cache: ArcSwap::default(),
             token_decimals: DashMap::default(),
+            watch_addresses_cache: DashMap::default(),
             chain_blocks_cache: DashMap::new(),
         }
     }
@@ -56,6 +58,7 @@ impl<D: DatabaseExt> CachedDb<D> {
             .into_iter()
             .map(|c| {
                 self.chain_blocks_cache.insert(c.name.clone(), c.last_processed_block);
+                self.watch_addresses_cache.insert(c.name.clone(), c.watch_addresses.clone());
                 (c.name.clone(), c)
             })
             .collect();
@@ -233,6 +236,48 @@ impl<D: DatabaseExt> ChainStore for CachedDb<D> {
         self.chain_blocks_cache.insert(chain_name.to_string(), block_num);
         Ok(())
     }
+
+    async fn add_watch_address(&self, chain_name: &str, address: String) -> anyhow::Result<bool> {
+        if !self.inner.add_watch_address(chain_name, address.clone()).await? {
+            return Ok(false);
+        }
+
+        if let Some(mut watch_addresses) = self.watch_addresses_cache
+            .get_mut(chain_name)
+        {
+            watch_addresses.insert(address);
+        }
+
+        Ok(true)
+    }
+
+    async fn remove_watch_address(&self, chain_name: &str, address: &str) -> anyhow::Result<bool> {
+        if !self.inner.remove_watch_address(chain_name, address).await? {
+            return Ok(false);
+        }
+
+        if let Some(mut watch_addresses) = self.watch_addresses_cache
+            .get_mut(chain_name)
+        {
+            watch_addresses.remove(address);
+        }
+
+        Ok(true)
+    }
+
+    async fn remove_watch_addresses(&self, chain_name: &str, addresses: &[String]) -> anyhow::Result<Vec<String>> {
+        let removed = self.inner.remove_watch_addresses(chain_name, addresses).await?;
+
+        if let Some(mut watch_addresses) = self.watch_addresses_cache
+            .get_mut(chain_name)
+        {
+            for address in &removed {
+                watch_addresses.remove(address);
+            }
+        }
+
+        Ok(removed)
+    }
 }
 
 #[async_trait]
@@ -364,8 +409,8 @@ impl<D: DatabaseExt> InvoiceStore for CachedDb<D> {
         self.inner.update_invoice_status(invoice_id, status).await
     }
 
-    async fn get_pending_invoice_by_address(&self, chain_name: &str, address: &str) -> anyhow::Result<Option<Invoice>> {
-        self.inner.get_pending_invoice_by_address(chain_name, address).await
+    async fn get_invoice_by_address(&self, address: &str) -> anyhow::Result<Option<Invoice>> {
+        self.inner.get_invoice_by_address(address).await
     }
 
     async fn expire_old_invoices(&self) -> anyhow::Result<Vec<ExpiredInvoiceInfo>> {
@@ -374,11 +419,6 @@ impl<D: DatabaseExt> InvoiceStore for CachedDb<D> {
 
     async fn update_invoice_paid(&self, invoice_id: Uuid, paid_raw: U256, new_status: Option<InvoiceStatus>) -> anyhow::Result<()> {
         self.inner.update_invoice_paid(invoice_id, paid_raw, new_status).await
-    }
-
-    // todo maybe I should cache this too
-    async fn get_watch_addresses(&self, chain_name: &str) -> anyhow::Result<Vec<String>> {
-        self.inner.get_watch_addresses(chain_name).await
     }
 }
 
@@ -446,6 +486,33 @@ impl<D: DatabaseExt> XPubStore for CachedDb<D> {
 #[async_trait]
 impl<D: DatabaseExt> DatabaseExt for CachedDb<D> {
     async fn get_latest_block(&self, chain_name: &str) -> anyhow::Result<Option<u64>> {
-        Ok(self.chain_blocks_cache.get(chain_name).map(|x| *x.value()))
+        if let Some(latest_block) = self.chain_blocks_cache.get(chain_name)
+            .map(|x| *x.value()) {
+            return Ok(Some(latest_block));
+        }
+
+        let cache_never_loaded = self.chains_cache.load().is_none();
+
+        if cache_never_loaded {
+            self.store_chains_cache().await?;
+
+            Ok(self.chain_blocks_cache.get(chain_name)
+                .map(|x| *x.value()))
+        } else { Ok(None) }
+    }
+
+    async fn get_watch_addresses(&self, chain_name: &str) -> anyhow::Result<Option<HashSet<String>>> {
+        if let Some(watch_addresses) = self.watch_addresses_cache.get(chain_name)
+            .map(|x| x.value().clone()) {
+            return Ok(Some(watch_addresses));
+        }
+
+        let cache_never_loaded = self.chains_cache.load().is_none();
+        if cache_never_loaded {
+            self.store_chains_cache().await?;
+
+            Ok(self.watch_addresses_cache.get(chain_name)
+                .map(|x| x.value().clone()))
+        } else { Ok(None) }
     }
 }

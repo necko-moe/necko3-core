@@ -49,6 +49,11 @@ pub trait DatabaseExt: DatabaseAdapter {
         Ok(self.get_chain(chain_name).await?
             .map(|c| c.required_confirmations))
     }
+    
+    async fn get_watch_addresses(&self, chain_name: &str) -> anyhow::Result<Option<HashSet<String>>> {
+        Ok(self.get_chain(chain_name).await?
+            .map(|c| c.watch_addresses))
+    }
 
     // token
     async fn get_token_contracts(&self, chain_name: &str) -> anyhow::Result<Vec<String>> {
@@ -76,8 +81,8 @@ pub trait DatabaseExt: DatabaseAdapter {
 
         self.update_payment_status(payment_id, PaymentStatus::Confirmed).await?;
 
-        let invoice = self.get_invoice(payment.invoice_id).await?
-            .ok_or_else(|| anyhow::anyhow!("Invoice {} not found", payment.invoice_id))?;
+        let invoice = self.get_invoice_by_address(&payment.to).await?
+            .ok_or_else(|| anyhow::anyhow!("Invoice for address {} not found", payment.to))?;
 
         let old_status = invoice.status;
         let paid_raw_before = invoice.paid_raw;

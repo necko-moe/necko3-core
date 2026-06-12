@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use crate::model::{ChainData, ChainType, ExpiredInvoiceInfo, FinalizedPaymentInfo, Invoice, InvoiceFilter, InvoiceStatus, PaginatedVec, PartialChainUpdate, Payment, PaymentFilter, PaymentStatus, TokenData, Webhook, WebhookEvent, WebhookFilter, WebhookJob, WebhookStatus};
 use crate::traits::*;
 use alloy_primitives::utils::format_units;
@@ -50,6 +51,8 @@ impl PostgresDatabase {
             block_lag: row.get::<i16, _>("block_lag") as u8,
             required_confirmations: row.get::<i64, _>("required_confirmations") as u64,
             logo_url: row.get("logo_url"),
+            watch_addresses: row.get::<Vec<String>, _>("watch_addresses")
+                .into_iter().collect(),
         })
     }
 
@@ -123,7 +126,6 @@ impl PostgresDatabase {
 
         Ok(Payment {
             id: row.get::<Uuid, _>("id"),
-            invoice_id: row.get::<Uuid, _>("invoice_id"),
             from: row.get("from"),
             to: row.get("to"),
             network: row.get("network"),
@@ -203,8 +205,9 @@ impl ChainStore for PostgresDatabase {
         sqlx::query(
             r#"INSERT INTO chains
                     (name, rpc_urls, chain_type, xpub, native_symbol, decimals,
-                     last_processed_block, block_lag, required_confirmations, active, logo_url)
-                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)"#,
+                     last_processed_block, block_lag, required_confirmations, active, logo_url,
+                     watch_addresses)
+                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)"#,
         )
             .bind(&chain_config.name)
             .bind(&chain_config.rpc_urls)
@@ -217,6 +220,8 @@ impl ChainStore for PostgresDatabase {
             .bind(chain_config.required_confirmations as i64)
             .bind(chain_config.active)
             .bind(&chain_config.logo_url)
+            .bind(chain_config.watch_addresses.iter()
+                .collect::<Vec<_>>())
             .execute(&self.pool)
             .await?;
 
@@ -262,7 +267,7 @@ impl ChainStore for PostgresDatabase {
             .bind(chain_update.xpub.to_owned())
             .bind(chain_update.block_lag.map(|x| x as i16))
             .bind(chain_update.required_confirmations.map(|x| x as i64))
-            .bind(chain_update.active.clone())
+            .bind(chain_update.active)
             .bind(chain_update.logo_url.clone())
             .bind(chain_name)
             .execute(&self.pool)
@@ -305,6 +310,60 @@ impl ChainStore for PostgresDatabase {
         }
 
         Ok(())
+    }
+
+    async fn add_watch_address(&self, chain_name: &str, address: String) -> anyhow::Result<bool> {
+        let result = sqlx::query(
+            r#"UPDATE chains SET watch_addresses = ARRAY_APPEND(watch_addresses, $1)
+                   WHERE name = $2 AND NOT ($1 = ANY(watch_addresses))"#
+        )
+            .bind(address)
+            .bind(chain_name)
+            .execute(&self.pool)
+            .await?;
+
+        Ok(result.rows_affected() > 0)
+    }
+
+    async fn remove_watch_address(&self, chain_name: &str, address: &str) -> anyhow::Result<bool> {
+        let result = sqlx::query(
+            r#"UPDATE chains SET watch_addresses = ARRAY_REMOVE(watch_addresses, $1)
+                   WHERE name = $2 AND ($1 = ANY(watch_addresses))"#
+        )
+            .bind(address)
+            .bind(chain_name)
+            .execute(&self.pool)
+            .await?;
+
+        Ok(result.rows_affected() > 0)
+    }
+
+    async fn remove_watch_addresses(&self, chain_name: &str, addresses: &[String]) -> anyhow::Result<Vec<String>> {
+        let to_remove: HashSet<&str> = addresses.iter()
+            .map(|s| s.as_str())
+            .collect();
+
+        let mut tx = self.pool.begin().await?;
+
+        let old_addresses: Vec<String> = sqlx::query_scalar(
+            "SELECT chains.watch_addresses FROM chains WHERE name = $1 FOR UPDATE"
+        )
+            .bind(chain_name)
+            .fetch_one(&mut *tx)
+            .await?;
+
+        let (removed, to_keep) = old_addresses.into_iter()
+            .partition(|address| to_remove.contains(address.as_str()));
+
+        sqlx::query("UPDATE chains SET watch_addresses = $1 WHERE name = $2")
+            .bind(to_keep)
+            .bind(chain_name)
+            .execute(&mut *tx)
+            .await?;
+
+        tx.commit().await?;
+
+        Ok(removed)
     }
 }
 
@@ -575,14 +634,13 @@ impl InvoiceStore for PostgresDatabase {
         Ok(())
     }
 
-    async fn get_pending_invoice_by_address(&self, chain_name: &str, address: &str) -> anyhow::Result<Option<Invoice>> {
+    async fn get_invoice_by_address(&self, address: &str) -> anyhow::Result<Option<Invoice>> {
         let row = sqlx::query(
             r#"SELECT
                        id, address, address_index, network, token, amount_raw::TEXT, paid_raw::TEXT,
                        status, decimals, created_at, expires_at, webhook_url, webhook_secret, webhook_max_retries
-                   FROM invoices WHERE network = $1 AND address = $2 AND status = 'Pending'"#
+                   FROM invoices WHERE address = $1"#
         )
-            .bind(chain_name)
             .bind(address)
             .fetch_optional(&self.pool)
             .await?;
@@ -619,17 +677,6 @@ impl InvoiceStore for PostgresDatabase {
 
         Ok(())
     }
-
-    async fn get_watch_addresses(&self, chain_name: &str) -> anyhow::Result<Vec<String>> {
-        let rows: Vec<String> = sqlx::query_scalar(
-            "SELECT address FROM invoices WHERE status = 'Pending' AND network = $1"
-        )
-            .bind(chain_name)
-            .fetch_all(&self.pool)
-            .await?;
-
-        Ok(rows)
-    }
 }
 
 #[async_trait]
@@ -639,11 +686,6 @@ impl PaymentStore for PostgresDatabase {
             builder: &mut QueryBuilder<sqlx::Postgres>,
             filter: &PaymentFilter
         ) -> anyhow::Result<()> {
-            if let Some(ref invoice_id) = filter.invoice_id {
-                builder.push(" AND invoice_id = ");
-                builder.push_bind(invoice_id);
-            }
-
             if let Some(ref from) = filter.from {
                 builder.push(r#" AND "from" = "#);
                 builder.push_bind(from);
@@ -690,7 +732,7 @@ impl PaymentStore for PostgresDatabase {
 
         let mut data_builder: QueryBuilder<sqlx::Postgres> = QueryBuilder::new(
             r#"SELECT
-                    id, invoice_id, "from", "to", network, tx_hash, token, amount_raw::TEXT,
+                    id, "from", "to", network, tx_hash, token, amount_raw::TEXT,
                     block_number, status, created_at, log_index
                 FROM payments WHERE TRUE"#
         );
@@ -722,7 +764,7 @@ impl PaymentStore for PostgresDatabase {
 
     async fn get_payment(&self, payment_id: Uuid) -> anyhow::Result<Option<Payment>> {
         sqlx::query(
-            r#"SELECT id, invoice_id, "from", "to", network, tx_hash, token,
+            r#"SELECT id, "from", "to", network, tx_hash, token,
                        amount_raw::TEXT, block_number, status, created_at, log_index
                    FROM payments WHERE id = $1"#
         )
@@ -735,7 +777,7 @@ impl PaymentStore for PostgresDatabase {
 
     async fn get_confirming_payments(&self) -> anyhow::Result<Vec<Payment>> {
         let rows = sqlx::query(
-            r#"SELECT id, invoice_id, "from", "to", network, tx_hash, token,
+            r#"SELECT id, "from", "to", network, tx_hash, token,
                        amount_raw::TEXT, block_number, status, created_at, log_index
                    FROM payments WHERE status = $1"#)
             .bind(PaymentStatus::Confirming.as_ref())
@@ -749,14 +791,13 @@ impl PaymentStore for PostgresDatabase {
         let amount_bd = BigDecimal::from_str(&payment.amount_raw.to_string())?;
 
         let row = sqlx::query(
-            r#"INSERT INTO payments (invoice_id, "from", "to", network, tx_hash, amount_raw,
+            r#"INSERT INTO payments ("from", "to", network, tx_hash, amount_raw,
                       block_number, status, log_index, token)
-                   VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+                   VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
                    ON CONFLICT (tx_hash, log_index, network)
                    DO UPDATE SET block_number = excluded.block_number
                    RETURNING (xmax = 0) AS inserted"#
         )
-            .bind(payment.invoice_id)
             .bind(&payment.from)
             .bind(&payment.to)
             .bind(&payment.network)
@@ -970,25 +1011,26 @@ impl DatabaseExt for PostgresDatabase {
         let mut tx = self.pool.begin().await?;
 
         let row = sqlx::query(
-            "UPDATE payments SET status = 'Confirmed' WHERE id = $1
-                                         RETURNING invoice_id, amount_raw::TEXT"
+            r#"UPDATE payments SET status = 'Confirmed' WHERE id = $1
+                                         RETURNING "to", amount_raw::TEXT"#
         )
             .bind(payment_id)
             .fetch_one(&mut *tx)
             .await?;
 
-        let inv_id: Uuid = row.get("invoice_id");
+        let to_address: String = row.get("to");
         let pay_amount_bd = BigDecimal::from_str(&row.get::<String, _>("amount_raw"))?;
 
         let inv = sqlx::query(
-            r#"UPDATE invoices SET paid_raw = paid_raw + $1 WHERE id = $2
+            r#"UPDATE invoices SET paid_raw = paid_raw + $1 WHERE address = $2
                    RETURNING (paid_raw - $1)::TEXT as old_paid_raw,
                        paid_raw::TEXT as new_paid_raw,
                        amount_raw::TEXT,
-                       status"# // could've used OLD.paid_raw and NEW.paid_raw but i wouldn't (sorry pg18)
+                       status,
+                       id"# // could've used OLD.paid_raw and NEW.paid_raw but i wouldn't (sorry pg18)
         )
             .bind(pay_amount_bd)
-            .bind(inv_id)
+            .bind(to_address)
             .fetch_one(&mut *tx)
             .await?;
 
@@ -1002,6 +1044,8 @@ impl DatabaseExt for PostgresDatabase {
         let old_status_str: String = inv.get("status");
         let old_status: InvoiceStatus = old_status_str.parse()
             .map_err(|e| anyhow::anyhow!("Unknown invoice status '{}' from DB: {}", old_status_str, e))?;
+
+        let inv_id: Uuid = inv.get("id");
 
         let is_fully_paid = inv_paid_after >= inv_amount;
         let new_status = if is_fully_paid {

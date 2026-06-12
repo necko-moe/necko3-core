@@ -1,1 +1,0 @@
-CREATE UNIQUE INDEX "idx_invoices_network_address" ON "invoices" ("network", "address");

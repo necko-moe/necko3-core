@@ -11,7 +11,6 @@ pub use necko3_types::*;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Payment {
     pub id: Uuid,
-    pub invoice_id: Uuid,
     pub from: String,
     pub to: String,
     pub network: String,
@@ -168,7 +167,6 @@ pub struct InvoiceFilter {
 
 #[derive(Default, Clone, Debug, Deserialize, Serialize)]
 pub struct PaymentFilter {
-    pub invoice_id: Option<Uuid>,
     pub from: Option<String>,
     pub to: Option<String>,
     pub network: Option<String>,

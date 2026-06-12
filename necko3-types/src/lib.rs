@@ -1,5 +1,6 @@
 pub mod blockchain;
 
+use std::collections::HashSet;
 use serde::{Deserialize, Serialize};
 use strum::{AsRefStr, Display, EnumString};
 
@@ -17,6 +18,7 @@ pub struct ChainData {
     pub block_lag: u8,
     pub required_confirmations: u64,
     pub logo_url: Option<String>,
+    pub watch_addresses: HashSet<String>,
 }
 
 impl ChainData {
