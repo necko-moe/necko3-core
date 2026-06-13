@@ -3,23 +3,30 @@ use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Duration;
 use alloy::consensus::Transaction;
-use alloy::network::{AnyNetwork, AnyRpcTransaction, ReceiptResponse, TransactionResponse};
-use alloy::primitives::{Address, TxHash, U256};
+use alloy::core::sol;
+use alloy::network::{AnyNetwork, ReceiptResponse, TransactionResponse};
+use alloy::primitives::{Address, BlockHash, BlockNumber, TxHash, U256};
 use alloy::primitives::utils::format_units;
 use alloy::providers::{DynProvider, Provider};
+use alloy::rpc::types::Filter;
+use alloy::sol_types::SolEvent;
 use arc_swap::ArcSwap;
 use async_trait::async_trait;
 use coins_bip32::prelude::{Parent, XPub};
-use tokio::sync::mpsc::Sender;
-use tokio::sync::watch::Receiver;
+use tokio::sync::{mpsc, watch};
 use tokio::time;
 use tokio::time::MissedTickBehavior;
 use tracing::{debug, error, info, instrument, trace, warn, Instrument};
-use necko3_types::blockchain::{Asset, ChainEvent, ChainState};
+use necko3_types::blockchain::{Asset, ChainEvent, ChainState, TrackTransaction};
 use necko3_types::TokenData;
 use crate::backends::create_fallback_provider;
 use crate::traits::adapter::BlockchainAdapter;
 use crate::traits::worker::BlockchainWorker;
+
+sol! {
+    #[derive(Debug)]
+    event Transfer(address indexed from, address indexed to, uint256 value);
+}
 
 pub struct EvmBlockchain {
     provider: ArcSwap<DynProvider<AnyNetwork>>,
@@ -52,14 +59,14 @@ impl BlockchainAdapter for EvmBlockchain {
     }
 
     #[instrument(skip(self), err)]
-    async fn get_tx_block_number(&self, tx_hash: &str) -> anyhow::Result<Option<u64>> {
+    async fn get_tx_block_number(&self, tx_hash: &str) -> anyhow::Result<Option<(BlockNumber, BlockHash)>> {
         debug!(tx_hash, "Checking transaction receipt");
         let hash = tx_hash.parse::<TxHash>()?;
 
         match self.provider.load().get_transaction_receipt(hash).await {
             Ok(Some(receipt)) => {
                 if receipt.status() {
-                    Ok(receipt.block_number)
+                    Ok(receipt.block_number.zip(receipt.block_hash))
                 } else {
                     debug!("Transaction failed on-chain");
                     Ok(None)
@@ -75,23 +82,39 @@ impl BlockchainAdapter for EvmBlockchain {
         }
     }
 
-    fn build_worker(state_rx: Receiver<ChainState>, event_tx: Sender<ChainEvent>) -> anyhow::Result<impl BlockchainWorker> {
-        EvmBlockchainWorker::new(state_rx, event_tx)
+    fn build_worker(
+        state_rx: watch::Receiver<ChainState>,
+        transactions_rs: mpsc::Receiver<TrackTransaction>,
+        event_tx: mpsc::Sender<ChainEvent>
+    ) -> anyhow::Result<impl BlockchainWorker> {
+        EvmBlockchainWorker::new(state_rx, transactions_rs, event_tx)
     }
+}
+
+struct TrackedTx {
+    tx_hash: String,
+    block_hash: BlockHash,
 }
 
 pub struct EvmBlockchainWorker {
     provider: DynProvider<AnyNetwork>,
 
-    state_rx: Receiver<ChainState>,
+    transactions_rs: mpsc::Receiver<TrackTransaction>,
+    tracked_txs: HashMap<BlockNumber, Vec<TrackedTx>>,
+
+    state_rx: watch::Receiver<ChainState>,
     watch_addresses: HashSet<Address>,
     tokens_map: HashMap<Address, TokenData>,
 
-    event_tx: Sender<ChainEvent>
+    event_tx: mpsc::Sender<ChainEvent>
 }
 
 impl EvmBlockchainWorker {
-    pub fn new(state_rx: Receiver<ChainState>, event_tx: Sender<ChainEvent>) -> anyhow::Result<Self> {
+    pub fn new(
+        state_rx: watch::Receiver<ChainState>,
+        transactions_rs: mpsc::Receiver<TrackTransaction>,
+        event_tx: mpsc::Sender<ChainEvent>
+    ) -> anyhow::Result<Self> {
         let state = state_rx.borrow().clone();
         let provider = match create_fallback_provider(&state.dynamic_data.rpc_urls) {
             Ok(p) => p,
@@ -120,6 +143,8 @@ impl EvmBlockchainWorker {
 
         Ok(Self {
             provider,
+            transactions_rs,
+            tracked_txs: HashMap::new(),
             watch_addresses,
             tokens_map,
             state_rx,
@@ -174,16 +199,18 @@ impl BlockchainWorker for EvmBlockchainWorker {
                                 warn!(error = %e, "Failed to get latest block number, retrying on next tick...");
                                 continue
                             }
-                        }.saturating_sub(tick_state.dynamic_data.block_lag as u64);
+                        };
+                        let block_with_lag = current_block_num
+                            .saturating_sub(tick_state.dynamic_data.block_lag as u64);
 
-                        if current_block_num <= latest_block_num {
+                        if block_with_lag <= latest_block_num {
                             trace!(current = current_block_num, last = latest_block_num,
                                 "No new blocks, skipping tick...");
                             continue
                         }
 
-                        for block_num in (latest_block_num + 1)..=current_block_num {
-                            let transactions = match self.process_block(block_num).await
+                        for block_num in (latest_block_num + 1)..=block_with_lag {
+                            let block_opt = match self.process_block(block_num).await
                             {
                                 Ok(transactions) => Some(transactions),
                                 Err(e) => {
@@ -194,26 +221,46 @@ impl BlockchainWorker for EvmBlockchainWorker {
                                 }
                             };
 
-                            // if let Some(txs) = transactions {
-                            //     if let Err(e) = self.process_logs(block_num, txs).await {
-                            //         error!(error = %e, block_number = block_num,
-                            //             "Failed to process logs for block");
-                            //     }
-                            // } else {
-                            //     warn!(block_number = block_num,
-                            //         "Skipping logs because process_block returned error instead of transactions");
-                            // }
+                            if let Some(block_hash) = block_opt {
+                                let actual_lag = current_block_num - block_num;
 
-                            latest_block_num = block_num;
+                                if let Err(e) = self.process_logs(block_hash, actual_lag).await {
+                                    error!(error = %e, block_number = block_num, block_hash = %block_hash,
+                                        "Failed to process logs for block");
+                                }
 
-                            if let Err(e) = self.event_tx.send(ChainEvent::BlockProcessed {
-                                chain_name: tick_state.static_data.name.clone(),
-                                block_number: block_num,
-                            }).await {
-                                warn!(error = %e, block_number = block_num,
-                                    "Failed to send BlockProcessed event");
+                                latest_block_num = block_num;
+
+                                if let Err(e) = self.event_tx.send(ChainEvent::BlockProcessed {
+                                    chain_name: tick_state.static_data.name.clone(),
+                                    block_number: block_num,
+                                    block_hash,
+                                }).await {
+                                    warn!(error = %e, block_number = block_num,
+                                        "Failed to send BlockProcessed event");
+                                }
+                            } else {
+                                warn!(block_number = block_num,
+                                    "Skipping logs because process_block returned error instead of transactions");
                             }
+
+                            // hell yeah, just go over again
                         }
+                    }
+
+                    track_request_opt = self.transactions_rs.recv() => {
+                        let track = if let Some(r) = track_request_opt { r }
+                        else {
+                            warn!("Tracking transactions channel closed. Exiting worker loop.");
+                            break
+                        };
+
+                        // self.tracked_txs.entry(track.block_number)
+                        //     .or_default()
+                        //     .push(TrackedTx {
+                        //         tx_hash: track.tx_hash,
+                        //         block_hash: track.block_hash,
+                        //     });
                     }
 
                     change_result = self.state_rx.changed() => {
@@ -281,15 +328,14 @@ impl BlockchainWorker for EvmBlockchainWorker {
                     }
                 }
             }
+
         }.instrument(worker_span).await;
     }
 }
 
 impl EvmBlockchainWorker {
-    async fn process_block(&self, block_number: u64) -> anyhow::Result<Vec<AnyRpcTransaction>> {
+    async fn process_block(&self, block_number: u64) -> anyhow::Result<BlockHash> {
         let state = self.state_rx.borrow().clone();
-
-        let mut delay = Duration::from_secs(1);
 
         let block = loop {
             match self.provider.get_block_by_number(block_number.into()).full().await {
@@ -297,28 +343,25 @@ impl EvmBlockchainWorker {
                 Ok(None) => { // block reorg?
                     warn!(
                         block_number,
-                        "Block not found (None). Possible sync lag. Retrying in {:?}...",
-                        delay
+                        "Block not found (None). Possible sync lag. Retrying in 1s..."
                     );
                 }
                 Err(e) => {
                     warn!(
                         error = %e,
                         block_number,
-                        "RPC provider error. Retrying in {:?}...",
-                        delay
+                        "RPC provider error. Retrying in 1s..."
                     );
                 }
             };
 
-            tokio::time::sleep(delay).await;
-            delay *= 2;
+            tokio::time::sleep(Duration::from_secs(1)).await;
             // we CAN NOT skip blocks btw
         };
 
-        let txs = block.into_inner().transactions.into_transactions_vec();
+        let block_hash = block.header.hash;
 
-        for tx in txs.iter() {
+        for tx in block.into_inner().transactions.into_transactions() {
             let address_to = if let Some(addr) = tx.to() {
                 addr
             } else { continue };
@@ -353,22 +396,133 @@ impl EvmBlockchainWorker {
                     amount_raw: amount,
                     amount_human,
                     block_number,
+                    block_hash,
+                    log_index: None,
                 };
 
                 if let Err(e) = self.event_tx.send(event).await {
-                    warn!(error = %e, block_number,
+                    warn!(error = %e, block_number, block_hash = %block_hash,
                         "Failed to send PaymentDetected event");
                 }
             }
         }
 
-        Ok(txs)
+        Ok(block_hash)
     }
 
-    async fn process_logs(&self, block_number: u64) -> anyhow::Result<()> {
+    async fn process_logs(
+        &self,
+        block_hash: BlockHash,
+        actual_lag: u64,
+    ) -> anyhow::Result<()> {
         let state = self.state_rx.borrow().clone();
 
+        if self.tokens_map.is_empty() {
+            trace!("No tokens to watch, skipping log processing");
+            return Ok(());
+        }
 
+        let filter = Filter::new()
+            .at_block_hash(block_hash)
+            .event_signature(Transfer::SIGNATURE_HASH);
+
+        let mut attempt = 0;
+        let max_retries = 3;
+
+        let logs = loop {
+            match self.provider.get_logs(&filter).await {
+                Ok(l) => {
+                    if !l.is_empty()
+                        || actual_lag >= state.dynamic_data.safe_lag as u64 {
+                        break l
+                    }
+
+                    if attempt < max_retries {
+                        attempt += 1;
+                        debug!(
+                            attempt,
+                            max_retries,
+                            "Tried to get logs with Transfer, but they are empty. Retrying in 1s..."
+                        );
+
+                        tokio::time::sleep(Duration::from_secs(1)).await;
+                        continue;
+                    }
+
+                    if attempt >= max_retries {
+                        debug!("Gave up retrying. Assuming transaction reverted or emitted no events.");
+                    }
+
+                    break l;
+                },
+                Err(e) => {
+                    warn!(error = %e, block_hash = %block_hash,
+                        "Failed to get logs. Retrying in 1s...");
+                    tokio::time::sleep(Duration::from_secs(1)).await;
+                }
+            }
+        };
+
+        if !logs.is_empty() {
+            debug!(count = logs.len(), "Received non-empty logs from RPC");
+        }
+
+        for log in logs {
+            let contract_address = log.address();
+
+            let token_data = match self.tokens_map.get(&contract_address) {
+                Some(data) => data,
+                None => {
+                    continue;
+                }
+            };
+
+            if let Ok(transfer) = log.log_decode::<Transfer>() {
+                let event_data = transfer.inner;
+
+                let address_to = event_data.to;
+
+                if !self.watch_addresses.contains(&address_to) {
+                    continue
+                }
+
+                let asset = Asset::Token(token_data.symbol.clone(), contract_address.to_string());
+                let amount = event_data.value;
+                let from = event_data.from.to_string();
+                let amount_human = format_units(amount, token_data.decimals)
+                    .unwrap_or_default();
+
+                let tx_hash = log.transaction_hash.unwrap_or_default()
+                    .to_string();
+                let block_number = log.block_number.unwrap_or_default();
+
+                info!(
+                    asset = %asset,
+                    %tx_hash,
+                    from = %from,
+                    to = %address_to.to_string(),
+                    amount = %amount_human,
+                    "Token transfer detected"
+                );
+
+                let event = ChainEvent::PaymentDetected {
+                    tx_hash,
+                    from,
+                    to: address_to.to_string(),
+                    asset,
+                    amount_raw: amount,
+                    amount_human,
+                    block_number,
+                    block_hash,
+                    log_index: log.log_index,
+                };
+
+                if let Err(e) = self.event_tx.send(event).await {
+                    warn!(error = %e, block_number, block_hash = %block_hash,
+                        "Failed to send PaymentDetected event");
+                }
+            }
+        }
 
         Ok(())
     }

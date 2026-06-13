@@ -1540,8 +1540,10 @@ name = "necko3-types"
 version = "0.1.2"
 dependencies = [
  "alloy-primitives",
+ "chrono",
  "serde",
  "strum",
+ "uuid",
 ]
 
 [[package]]

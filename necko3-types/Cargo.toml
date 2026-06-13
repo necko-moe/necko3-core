@@ -7,4 +7,7 @@ edition = "2024"
 serde = { version = "1", features = ["derive"] }
 strum = { version = "0.28", features = ["derive"] }
 
-alloy-primitives = "1.6"
+uuid = { version = "1.23", features = ["v4", "serde"] }
+chrono = { version = "0.4", features = ["serde"] }
+
+alloy-primitives = { version = "1.6", features = ["serde"] }

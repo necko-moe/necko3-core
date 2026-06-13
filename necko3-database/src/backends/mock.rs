@@ -328,6 +328,7 @@ impl PaymentStore for MockDatabase {
                     && filter.network.as_ref().map_or(true, |n| pay.network == *n)
                     && filter.token.as_ref().map_or(true, |t| pay.token == *t)
                     && filter.block_number.as_ref().map_or(true, |b| pay.block_number == *b)
+                    && filter.block_hash.as_ref().map_or(true, |b| pay.block_hash == *b)
                     && filter.status.as_ref().map_or(true, |s| pay.status == *s)
             })
             .map(|x| x.value().clone())
@@ -367,6 +368,7 @@ impl PaymentStore for MockDatabase {
     async fn upsert_payment(&self, payment: &Payment) -> anyhow::Result<bool> {
         if let Some(mut existing) = self.payments.get_mut(&payment.id) {
             existing.block_number = payment.block_number;
+            existing.block_hash = payment.block_hash;
             return Ok(false)
         }
 

@@ -1,4 +1,4 @@
-use alloy_primitives::U256;
+use alloy_primitives::{BlockHash, U256};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use sqlx::types::Json;
@@ -8,21 +8,6 @@ use uuid::Uuid;
 
 pub use necko3_types::*;
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Payment {
-    pub id: Uuid,
-    pub from: String,
-    pub to: String,
-    pub network: String,
-    pub token: String,
-    pub tx_hash: String,
-    pub amount_raw: U256,
-    pub block_number: u64,
-    pub log_index: u64,
-    pub status: PaymentStatus,
-    pub created_at: DateTime<Utc>,
-}
-
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq,
     Display, EnumString, AsRefStr)]
 #[strum(serialize_all = "PascalCase")]
@@ -30,15 +15,6 @@ pub enum InvoiceStatus {
     Pending,
     Paid,
     Expired,
-    Cancelled,
-}
-
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq,
-    Display, EnumString, AsRefStr)]
-#[strum(serialize_all = "PascalCase")]
-pub enum PaymentStatus {
-    Confirming,
-    Confirmed,
     Cancelled,
 }
 
@@ -172,6 +148,7 @@ pub struct PaymentFilter {
     pub network: Option<String>,
     pub token: Option<String>,
     pub block_number: Option<u64>,
+    pub block_hash: Option<BlockHash>,
     pub status: Option<PaymentStatus>,
 
     pub pagination: Pagination,

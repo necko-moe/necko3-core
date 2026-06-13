@@ -2,7 +2,7 @@ use std::collections::HashSet;
 use crate::model::{ChainData, ChainType, ExpiredInvoiceInfo, FinalizedPaymentInfo, Invoice, InvoiceFilter, InvoiceStatus, PaginatedVec, PartialChainUpdate, Payment, PaymentFilter, PaymentStatus, TokenData, Webhook, WebhookEvent, WebhookFilter, WebhookJob, WebhookStatus};
 use crate::traits::*;
 use alloy_primitives::utils::format_units;
-use alloy_primitives::U256;
+use alloy_primitives::{B256, U256};
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use serde_json::Value;
@@ -60,6 +60,7 @@ impl PostgresAdapter {
             decimals: row.get::<i16, _>("decimals") as u8,
             last_processed_block: row.get::<i64, _>("last_processed_block") as u64,
             block_lag: row.get::<i16, _>("block_lag") as u8,
+            safe_lag: row.get::<i16, _>("safe_lag") as u8,
             required_confirmations: row.get::<i64, _>("required_confirmations") as u64,
             logo_url: row.get("logo_url"),
             watch_addresses: row.get::<Vec<String>, _>("watch_addresses")
@@ -131,9 +132,13 @@ impl PostgresAdapter {
         let status: PaymentStatus = status_str.parse()
             .map_err(|e| anyhow::anyhow!("Unknown payment status '{}' from DB: {}", status_str, e))?;
 
-        let amount_bd: String = row.get("amount_raw");
-        let amount_raw = U256::from_str(&amount_bd)
+        let amount_str: String = row.get("amount_raw");
+        let amount_raw = U256::from_str(&amount_str)
             .map_err(|e| anyhow::anyhow!("Failed to parse amount_raw: {}", e))?;
+
+        let block_hash_str: String = row.get("block_hash");
+        let block_hash = B256::from_str(&block_hash_str)
+            .map_err(|e| anyhow::anyhow!("Failed to parse block_hash: {}", e))?;
 
         Ok(Payment {
             id: row.get::<Uuid, _>("id"),
@@ -144,6 +149,7 @@ impl PostgresAdapter {
             tx_hash: row.get("tx_hash"),
             amount_raw,
             block_number: row.get::<i64, _>("block_number") as u64,
+            block_hash,
             status,
             created_at: row.get("created_at"),
             log_index: row.get::<i64, _>("log_index") as u64,
@@ -217,8 +223,8 @@ impl ChainStore for PostgresAdapter {
             r#"INSERT INTO chains
                     (name, rpc_urls, chain_type, xpub, native_symbol, decimals,
                      last_processed_block, block_lag, required_confirmations, active, logo_url,
-                     watch_addresses)
-                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)"#,
+                     watch_addresses, safe_lag)
+                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)"#,
         )
             .bind(&chain_config.name)
             .bind(&chain_config.rpc_urls)
@@ -233,6 +239,7 @@ impl ChainStore for PostgresAdapter {
             .bind(&chain_config.logo_url)
             .bind(chain_config.watch_addresses.iter()
                 .collect::<Vec<_>>())
+            .bind(chain_config.safe_lag)
             .execute(&self.pool)
             .await?;
 
@@ -270,8 +277,9 @@ impl ChainStore for PostgresAdapter {
                        block_lag = COALESCE($4, block_lag),
                        required_confirmations = COALESCE($5, required_confirmations),
                        active = COALESCE($6, active),
-                       logo_url = COALESCE($7, logo_url)
-                   WHERE name = $8"#
+                       logo_url = COALESCE($7, logo_url),
+                       safe_lag = COALESCE($8, safe_lag)
+                   WHERE name = $9"#
         )
             .bind(chain_update.rpc_urls.clone())
             .bind(chain_update.last_processed_block.map(|x| x as i64))
@@ -280,6 +288,7 @@ impl ChainStore for PostgresAdapter {
             .bind(chain_update.required_confirmations.map(|x| x as i64))
             .bind(chain_update.active)
             .bind(chain_update.logo_url.clone())
+            .bind(chain_update.safe_lag.map(|x| x as i16))
             .bind(chain_name)
             .execute(&self.pool)
             .await?;
@@ -722,6 +731,11 @@ impl PaymentStore for PostgresAdapter {
                 builder.push_bind(*block_number as i64);
             }
 
+            if let Some(ref block_hash) = filter.block_hash {
+                builder.push(" AND block_hash = ");
+                builder.push_bind(block_hash.to_string());
+            }
+
             if let Some(ref status) = filter.status {
                 builder.push(" AND status = ");
                 builder.push_bind(status.to_string());
@@ -744,7 +758,7 @@ impl PaymentStore for PostgresAdapter {
         let mut data_builder: QueryBuilder<sqlx::Postgres> = QueryBuilder::new(
             r#"SELECT
                     id, "from", "to", network, tx_hash, token, amount_raw::TEXT,
-                    block_number, status, created_at, log_index
+                    block_number, block_hash::TEXT, status, created_at, log_index
                 FROM payments WHERE TRUE"#
         );
 
@@ -775,8 +789,8 @@ impl PaymentStore for PostgresAdapter {
 
     async fn get_payment(&self, payment_id: Uuid) -> anyhow::Result<Option<Payment>> {
         sqlx::query(
-            r#"SELECT id, "from", "to", network, tx_hash, token,
-                       amount_raw::TEXT, block_number, status, created_at, log_index
+            r#"SELECT id, "from", "to", network, tx_hash, token, amount_raw::TEXT,
+                       block_number, block_hash::TEXT, status, created_at, log_index
                    FROM payments WHERE id = $1"#
         )
             .bind(payment_id)
@@ -788,8 +802,8 @@ impl PaymentStore for PostgresAdapter {
 
     async fn get_confirming_payments(&self) -> anyhow::Result<Vec<Payment>> {
         let rows = sqlx::query(
-            r#"SELECT id, "from", "to", network, tx_hash, token,
-                       amount_raw::TEXT, block_number, status, created_at, log_index
+            r#"SELECT id, "from", "to", network, tx_hash, token, amount_raw::TEXT,
+                       block_number, block_hash::TEXT, status, created_at, log_index
                    FROM payments WHERE status = $1"#)
             .bind(PaymentStatus::Confirming.as_ref())
             .fetch_all(&self.pool)
@@ -803,8 +817,8 @@ impl PaymentStore for PostgresAdapter {
 
         let row = sqlx::query(
             r#"INSERT INTO payments ("from", "to", network, tx_hash, amount_raw,
-                      block_number, status, log_index, token)
-                   VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+                      block_number, block_hash, status, log_index, token)
+                   VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
                    ON CONFLICT (tx_hash, log_index, network)
                    DO UPDATE SET block_number = excluded.block_number
                    RETURNING (xmax = 0) AS inserted"#
@@ -815,6 +829,7 @@ impl PaymentStore for PostgresAdapter {
             .bind(&payment.tx_hash)
             .bind(amount_bd)
             .bind(payment.block_number as i64)
+            .bind(payment.block_hash.to_string())
             .bind(payment.status.to_string())
             .bind(payment.log_index as i64)
             .bind(&payment.token)
