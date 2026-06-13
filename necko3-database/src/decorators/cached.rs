@@ -33,7 +33,7 @@ struct TokenCacheState {
 }
 
 impl<D> CachedDb<D> {
-    pub fn new(inner: Arc<D>) -> Self {
+    pub fn with(inner: Arc<D>) -> Self {
         Self {
             inner,
             chains_cache: ArcSwapOption::empty(),

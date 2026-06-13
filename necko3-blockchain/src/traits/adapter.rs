@@ -12,8 +12,7 @@ pub trait BlockchainAdapter: Send + Sync {
     async fn get_tx_block_number(&self, tx_hash: &str) -> anyhow::Result<Option<u64>>;
 
     fn build_worker(
-        &self,
         state_rx: watch::Receiver<ChainState>,
         event_tx: mpsc::Sender<ChainEvent>
-    ) -> Box<dyn BlockchainWorker>;
+    ) -> anyhow::Result<impl BlockchainWorker>;
 }

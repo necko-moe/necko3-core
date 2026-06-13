@@ -1,12 +1,12 @@
 use crate::model::{ChainData, FinalizedPaymentInfo, InvoiceStatus, PaymentStatus, Webhook, WebhookEvent, WebhookStatus};
-use crate::traits::DatabaseAdapter;
+use crate::traits::DatabaseStore;
 use async_trait::async_trait;
 use chrono::Utc;
 use std::collections::HashSet;
 use uuid::Uuid;
 
 #[async_trait]
-pub trait DatabaseExt: DatabaseAdapter {
+pub trait DatabaseExt: DatabaseStore {
     // chain
     async fn get_chains_with_token(&self, token_symbol: &str) -> anyhow::Result<Vec<ChainData>> {
         let chains = self.get_chains().await?;
@@ -49,7 +49,7 @@ pub trait DatabaseExt: DatabaseAdapter {
         Ok(self.get_chain(chain_name).await?
             .map(|c| c.required_confirmations))
     }
-    
+
     async fn get_watch_addresses(&self, chain_name: &str) -> anyhow::Result<Option<HashSet<String>>> {
         Ok(self.get_chain(chain_name).await?
             .map(|c| c.watch_addresses))

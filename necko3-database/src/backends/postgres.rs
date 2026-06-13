@@ -6,18 +6,27 @@ use alloy_primitives::U256;
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use serde_json::Value;
-use sqlx::postgres::PgRow;
+use sqlx::postgres::{PgPoolOptions, PgRow};
 use sqlx::types::BigDecimal;
 use sqlx::{PgPool, QueryBuilder, Row};
 use std::str::FromStr;
 use uuid::Uuid;
 
-pub struct PostgresDatabase {
+pub struct PostgresAdapter {
     pool: PgPool
 }
 
-impl PostgresDatabase {
-    pub async fn new(pool: PgPool) -> anyhow::Result<Self> {
+#[async_trait]
+impl DatabaseAdapter for PostgresAdapter {
+    async fn new(database_url: &str, max_connections: u32) -> anyhow::Result<Self>
+    where
+        Self: Sized
+    {
+        let pool = PgPoolOptions::new()
+            .max_connections(max_connections)
+            .connect(database_url)
+            .await?;
+
         sqlx::query(
             "UPDATE webhooks SET status = 'Pending' WHERE status = 'Processing'"
         )
@@ -26,7 +35,9 @@ impl PostgresDatabase {
 
         Ok(Self { pool })
     }
+}
 
+impl PostgresAdapter {
     pub fn pool(&self) -> &PgPool {
         &self.pool
     }
@@ -166,7 +177,7 @@ impl PostgresDatabase {
 }
 
 #[async_trait]
-impl ChainStore for PostgresDatabase {
+impl ChainStore for PostgresAdapter {
     async fn get_chains(&self) -> anyhow::Result<Vec<ChainData>> {
         let rows = sqlx::query(
             r#"SELECT * FROM chains"#
@@ -368,7 +379,7 @@ impl ChainStore for PostgresDatabase {
 }
 
 #[async_trait]
-impl TokenStore for PostgresDatabase {
+impl TokenStore for PostgresAdapter {
     async fn get_tokens(&self, chain_name: &str) -> anyhow::Result<Vec<TokenData>> {
         let rows = sqlx::query(
             r#"SELECT t.*
@@ -507,7 +518,7 @@ impl TokenStore for PostgresDatabase {
 }
 
 #[async_trait]
-impl InvoiceStore for PostgresDatabase {
+impl InvoiceStore for PostgresAdapter {
     async fn get_invoices(&self, filter: InvoiceFilter) -> anyhow::Result<PaginatedVec<Invoice>> {
         fn apply_filters(
             builder: &mut QueryBuilder<sqlx::Postgres>,
@@ -680,7 +691,7 @@ impl InvoiceStore for PostgresDatabase {
 }
 
 #[async_trait]
-impl PaymentStore for PostgresDatabase {
+impl PaymentStore for PostgresAdapter {
     async fn get_payments(&self, filter: PaymentFilter) -> anyhow::Result<PaginatedVec<Payment>> {
         fn apply_filters(
             builder: &mut QueryBuilder<sqlx::Postgres>,
@@ -838,7 +849,7 @@ impl PaymentStore for PostgresDatabase {
 }
 
 #[async_trait]
-impl WebhookStore for PostgresDatabase {
+impl WebhookStore for PostgresAdapter {
     async fn get_webhooks(&self, filter: WebhookFilter) -> anyhow::Result<PaginatedVec<Webhook>> {
         fn apply_filters(
             builder: &mut QueryBuilder<sqlx::Postgres>,
@@ -988,7 +999,7 @@ impl WebhookStore for PostgresDatabase {
 }
 
 #[async_trait]
-impl XPubStore for PostgresDatabase {
+impl XPubStore for PostgresAdapter {
     async fn next_derivation_index(&self, xpub: &str) -> anyhow::Result<u64> {
         let index: i64 = sqlx::query_scalar(
             r#"INSERT INTO xpub_states (xpub, last_used_index)
@@ -1006,7 +1017,7 @@ impl XPubStore for PostgresDatabase {
 }
 
 #[async_trait]
-impl DatabaseExt for PostgresDatabase {
+impl DatabaseExt for PostgresAdapter {
     async fn finalize_payment(&self, payment_id: Uuid) -> anyhow::Result<FinalizedPaymentInfo> {
         let mut tx = self.pool.begin().await?;
 

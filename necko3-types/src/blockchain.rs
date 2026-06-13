@@ -1,8 +1,15 @@
-use alloy_primitives::{Address, U256};
 use crate::{ChainData, ChainType, TokenData};
+use alloy_primitives::U256;
+use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
-use serde::{Deserialize, Serialize};
+use strum::Display;
+
+#[derive(Display, Debug, Clone)]
+pub enum Asset {
+    Native(String),
+    Token(String),
+}
 
 #[derive(Debug, Clone)]
 pub enum ChainEvent {
@@ -10,8 +17,9 @@ pub enum ChainEvent {
         tx_hash: String,
         from: String,
         to: String,
-        token_symbol: String,
+        asset: Asset,
         amount_raw: U256,
+        amount_human: String,
         block_number: u64,
     },
 
@@ -66,7 +74,6 @@ pub struct ChainState {
     pub static_data: Arc<ChainStaticData>,
     pub dynamic_data: Arc<ChainDynamicData>,
 
-    pub tokens_map: Arc<HashMap<Address, TokenData>>,
-
-    pub watch_addresses: Arc<HashSet<Address>>,
+    pub tokens_map: Arc<HashMap<String, TokenData>>,
+    pub watch_addresses: Arc<HashSet<String>>,
 }

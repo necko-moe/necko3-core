@@ -1,5 +1,5 @@
 use crate::model::{ChainData, ExpiredInvoiceInfo, Invoice, InvoiceFilter, InvoiceStatus, PaginatedVec, PartialChainUpdate, Payment, PaymentFilter, PaymentStatus, TokenData, Webhook, WebhookFilter, WebhookJob, WebhookStatus};
-use crate::traits::{ChainStore, DatabaseExt, InvoiceStore, PaymentStore, TokenStore, WebhookStore, XPubStore};
+use crate::traits::{ChainStore, DatabaseAdapter, DatabaseExt, InvoiceStore, PaymentStore, TokenStore, WebhookStore, XPubStore};
 use alloy_primitives::utils::format_units;
 use alloy_primitives::U256;
 use async_trait::async_trait;
@@ -22,9 +22,13 @@ pub struct MockDatabase {
     xpub_states: DashMap<String, AtomicU64>,
 }
 
-impl MockDatabase {
-    pub fn new() -> Self {
-        Default::default()
+#[async_trait]
+impl DatabaseAdapter for MockDatabase {
+    async fn new(_database_url: &str, _max_connections: u32) -> anyhow::Result<Self>
+    where
+        Self: Sized
+    {
+        Ok(Default::default())
     }
 }
 
@@ -99,7 +103,7 @@ impl ChainStore for MockDatabase {
             .get_mut(chain_name)
         {
             let added = chain.watch_addresses.insert(address);
-            
+
             Ok(added)
         } else { Ok(false) }
     }
