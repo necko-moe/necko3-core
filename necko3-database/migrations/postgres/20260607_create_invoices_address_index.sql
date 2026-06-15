@@ -1,1 +1,0 @@
-CREATE UNIQUE INDEX "idx_invoices_address" ON "invoices" ("address");

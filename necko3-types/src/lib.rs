@@ -89,6 +89,7 @@ pub struct Payment {
     Display, EnumString, AsRefStr)]
 #[strum(serialize_all = "PascalCase")]
 pub enum PaymentStatus {
+    Pending,
     Confirming,
     Confirmed,
     Failed,

@@ -1,5 +1,5 @@
 use crate::{ChainData, ChainType, TokenData};
-use alloy_primitives::{B256, U256};
+use alloy_primitives::{BlockHash, BlockNumber, B256, U256};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -25,12 +25,37 @@ pub enum ChainEvent {
 
         block_hash: B256,
         log_index: Option<u64>,
+
+        required_confirmations: u64,
+    },
+
+    PaymentReorged {
+        tx_hash: String,
+        old_block_number: u64,
+        new_block_number: u64,
+        old_block_hash: B256,
+        new_block_hash: B256,
+    },
+
+    PaymentConfirmed {
+        tx_hash: String,
+        block_number: u64,
+        block_hash: B256,
+        confirmed_after: u64,
+    },
+
+    PaymentFailed {
+        tx_hash: String,
     },
 
     BlockProcessed {
-        chain_name: String,
         block_number: u64,
         block_hash: B256,
+    },
+
+    BlocksReorged {
+        new_blocks: Vec<(BlockNumber, BlockHash)>, 
+        pending_transactions: Vec<String> // tx_hash
     },
 
     FatalError(String),
@@ -83,6 +108,8 @@ pub struct ChainState {
 
     pub tokens_map: Arc<HashMap<String, TokenData>>,
     pub watch_addresses: Arc<HashSet<String>>,
+
+    pub block_hashes: Arc<HashMap<BlockNumber, BlockHash>>
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -90,5 +117,6 @@ pub struct TrackTransaction {
     pub tx_hash: String,
     pub block_number: u64,
     pub block_hash: B256,
+    pub confirm_after: u64,
 }
 

@@ -239,7 +239,7 @@ impl ChainStore for PostgresAdapter {
             .bind(&chain_config.logo_url)
             .bind(chain_config.watch_addresses.iter()
                 .collect::<Vec<_>>())
-            .bind(chain_config.safe_lag)
+            .bind(chain_config.safe_lag as i16)
             .execute(&self.pool)
             .await?;
 
