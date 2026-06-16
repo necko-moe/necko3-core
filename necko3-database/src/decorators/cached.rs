@@ -439,8 +439,12 @@ impl<D: DatabaseExt> PaymentStore for CachedDb<D> {
         self.inner.get_payment(payment_id).await
     }
 
-    async fn get_confirming_payments(&self) -> anyhow::Result<Vec<Payment>> {
-        self.inner.get_confirming_payments().await
+    async fn get_payment_by_tx_hash(&self, tx_hash: String) -> anyhow::Result<Option<Payment>> {
+        self.inner.get_payment_by_tx_hash(tx_hash).await
+    }
+
+    async fn get_payments_by_status(&self, status: PaymentStatus) -> anyhow::Result<Vec<Payment>> {
+        self.inner.get_payments_by_status(status).await
     }
 
     async fn upsert_payment(&self, payment: &UpsertPayment) -> anyhow::Result<(Uuid, bool)> {
@@ -451,8 +455,8 @@ impl<D: DatabaseExt> PaymentStore for CachedDb<D> {
         self.inner.update_payment_status(payment_id, status).await
     }
 
-    async fn update_payment_block_number(&self, payment_id: Uuid, block_num: u64) -> anyhow::Result<()> {
-        self.inner.update_payment_block_number(payment_id, block_num).await
+    async fn update_payment_block(&self, payment_id: Uuid, block_num: u64, block_hash: String) -> anyhow::Result<()> {
+        self.inner.update_payment_block(payment_id, block_num, block_hash).await
     }
 }
 

@@ -75,36 +75,55 @@ pub trait DatabaseExt: DatabaseStore {
     }
 
     // payment
-    async fn finalize_payment(&self, payment_id: Uuid) -> anyhow::Result<FinalizedPaymentInfo> {
+    async fn finalize_payment(&self, payment_id: Uuid) -> anyhow::Result<Option<FinalizedPaymentInfo>> {
         let payment = self.get_payment(payment_id).await?
             .ok_or_else(|| anyhow::anyhow!("Payment {} not found", payment_id))?;
 
         self.update_payment_status(payment_id, PaymentStatus::Confirmed).await?;
 
-        let invoice = self.get_invoice_by_address(&payment.to).await?
-            .ok_or_else(|| anyhow::anyhow!("Invoice for address {} not found", payment.to))?;
+        let invoice = self.get_invoice_by_address(&payment.to).await?;
 
-        let old_status = invoice.status;
-        let paid_raw_before = invoice.paid_raw;
-        let new_paid_raw = invoice.paid_raw + payment.amount_raw;
+        if let Some(invoice) = invoice {
+            let old_status = invoice.status;
+            let paid_raw_before = invoice.paid_raw;
+            let new_paid_raw = invoice.paid_raw + payment.amount_raw;
 
-        let is_fully_paid = new_paid_raw >= invoice.amount_raw;
-        let new_status = if is_fully_paid {
-            Some(InvoiceStatus::Paid)
-        } else { None };
+            let is_fully_paid = new_paid_raw >= invoice.amount_raw;
+            let new_status = if is_fully_paid {
+                Some(InvoiceStatus::Paid)
+            } else { None };
 
-        self.update_invoice_paid(invoice.id, new_paid_raw, new_status).await?;
+            self.update_invoice_paid(invoice.id, new_paid_raw, new_status).await?;
 
-        Ok(FinalizedPaymentInfo {
-            is_fully_paid,
-            invoice_id: invoice.id,
-            paid_raw_before,
-            paid_raw_after: new_paid_raw,
-            old_invoice_status: old_status,
-            new_invoice_status: new_status.unwrap_or(old_status),
-        })
+            Ok(Some(FinalizedPaymentInfo {
+                is_fully_paid,
+                invoice_id: invoice.id,
+                paid_raw_before,
+                paid_raw_after: new_paid_raw,
+                old_invoice_status: old_status,
+                new_invoice_status: new_status.unwrap_or(old_status),
+            }))
+        } else { Ok(None) }
     }
 
+    async fn mark_txs_as_pending(&self, tx_hashes: &[String]) -> anyhow::Result<Vec<String>> {
+        let mut skipped = Vec::new();
+
+        for tx_hash in tx_hashes {
+            let payment = match self.get_payment_by_tx_hash(tx_hash.clone()).await? {
+                Some(p) => p,
+                None => {
+                    skipped.push(tx_hash.to_string());
+                    continue
+                }
+            };
+
+            self.update_payment_status(payment.id, PaymentStatus::Pending).await?;
+        }
+        
+        Ok(skipped)
+    }
+    
     async fn cancel_payment(&self, payment_id: Uuid) -> anyhow::Result<()> {
         self.update_payment_status(payment_id, PaymentStatus::Cancelled).await
     }

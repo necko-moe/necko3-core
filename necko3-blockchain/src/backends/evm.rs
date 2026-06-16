@@ -12,11 +12,11 @@ use alloy::rpc::types::Filter;
 use alloy::sol_types::SolEvent;
 use async_trait::async_trait;
 use coins_bip32::prelude::{Parent, XPub};
-use tokio::sync::{mpsc, watch};
+use tokio::sync::mpsc;
 use tokio::time;
 use tokio::time::MissedTickBehavior;
 use tracing::{debug, error, info, instrument, trace, warn, Instrument};
-use necko3_types::blockchain::{Asset, ChainEvent, ChainState, TrackTransaction};
+use necko3_types::blockchain::{Asset, ChainEvent, ChainState, StateCommand, TrackTransaction};
 use necko3_types::TokenData;
 use crate::backends::create_fallback_provider;
 use crate::traits::adapter::BlockchainAdapter;
@@ -47,12 +47,35 @@ impl BlockchainAdapter for EvmBlockchain {
     }
 
     fn build_worker(
+        state: ChainState,
+        tokens_map: HashMap<String, TokenData>,
+        watch_addresses: HashSet<String>,
         block_hashes: HashMap<BlockNumber, String>,
-        state_rx: watch::Receiver<ChainState>,
+
+        state_rx: mpsc::Receiver<StateCommand>,
         transactions_rx: mpsc::Receiver<TrackTransaction>,
         event_tx: mpsc::Sender<ChainEvent>
     ) -> anyhow::Result<impl BlockchainWorker> {
-        EvmBlockchainWorker::new(block_hashes, state_rx, transactions_rx, event_tx)
+        let worker_watch_addresses = watch_addresses.iter()
+            .map(|s| s.parse::<Address>())
+            .collect::<Result<HashSet<_>, _>>()?;
+
+        let mut worker_tokens_map = HashMap::with_capacity(tokens_map.len());
+
+        for (k, v) in tokens_map.iter() {
+            match k.parse::<Address>() {
+                Ok(addr) => {
+                    worker_tokens_map.insert(addr, v.clone());
+                }
+                Err(e) => {
+                    warn!(contract_address = k, error = %e,
+                        "Failed to parse token contract_address as Address");
+                }
+            }
+        }
+
+        EvmBlockchainWorker::new(state, worker_tokens_map, worker_watch_addresses, block_hashes,
+                                 state_rx, transactions_rx, event_tx)
     }
 }
 
@@ -65,16 +88,18 @@ struct TrackedTx {
 
 pub struct EvmBlockchainWorker {
     provider: DynProvider<AnyNetwork>,
+    state: ChainState,
+    state_rx: mpsc::Receiver<StateCommand>,
 
-    transactions_rs: mpsc::Receiver<TrackTransaction>,
+    transactions_rx: mpsc::Receiver<TrackTransaction>,
     /// key = block_number+required_confirmations
     tracked_txs: HashMap<BlockNumber, HashSet<TrackedTx>>,
     tx_block_map: HashMap<TxHash, (BlockNumber, TrackedTx)>,
 
     block_hashes: HashMap<BlockNumber, String>,
 
-    state_rx: watch::Receiver<ChainState>,
     watch_addresses: HashSet<Address>,
+    /// key = contract_address
     tokens_map: HashMap<Address, TokenData>,
 
     event_tx: mpsc::Sender<ChainEvent>
@@ -82,12 +107,15 @@ pub struct EvmBlockchainWorker {
 
 impl EvmBlockchainWorker {
     pub fn new(
+        state: ChainState,
+        tokens_map: HashMap<Address, TokenData>,
+        watch_addresses: HashSet<Address>,
         block_hashes: HashMap<BlockNumber, String>,
-        state_rx: watch::Receiver<ChainState>,
+
+        state_rx: mpsc::Receiver<StateCommand>,
         transactions_rx: mpsc::Receiver<TrackTransaction>,
         event_tx: mpsc::Sender<ChainEvent>
     ) -> anyhow::Result<Self> {
-        let state = state_rx.borrow().clone();
         let provider = match create_fallback_provider(&state.dynamic_data.rpc_urls) {
             Ok(p) => p,
             Err(e) => {
@@ -95,32 +123,15 @@ impl EvmBlockchainWorker {
             }
         };
 
-        let watch_addresses = state.watch_addresses.iter()
-            .map(|s| s.parse::<Address>())
-            .collect::<Result<HashSet<_>, _>>()?;
-
-        let mut tokens_map = HashMap::with_capacity(state.tokens_map.len());
-
-        for (k, v) in state.tokens_map.iter() {
-            match k.parse::<Address>() {
-                Ok(addr) => {
-                    tokens_map.insert(addr, v.clone());
-                }
-                Err(e) => {
-                    warn!(contract_address = k, error = %e,
-                        "Failed to parse token contract_address as Address");
-                }
-            }
-        }
-
         Ok(Self {
             provider,
-            transactions_rs: transactions_rx,
+            state,
+            state_rx,
+            transactions_rx,
             tracked_txs: HashMap::new(),
             watch_addresses,
             tokens_map,
             block_hashes,
-            state_rx,
             event_tx,
             tx_block_map: Default::default(),
         })
@@ -131,12 +142,11 @@ impl EvmBlockchainWorker {
 impl BlockchainWorker for EvmBlockchainWorker {
     #[instrument(skip(self))]
     async fn run(mut self) {
-        let start_state = self.state_rx.borrow().clone();
-        let worker_span = tracing::info_span!("worker", chain_name = start_state.static_data.name);
+        let worker_span = tracing::info_span!("worker", chain_name = self.state.static_data.name);
 
         async {
             // starting point
-            let mut latest_block_num = start_state.dynamic_data.last_processed_block;
+            let mut latest_block_num = self.state.static_data.starting_block_num;
             if latest_block_num == 0 {
                 latest_block_num = loop {
                     match self.provider.get_block_number().await {
@@ -151,12 +161,6 @@ impl BlockchainWorker for EvmBlockchainWorker {
 
             info!(latest_block = latest_block_num, "Starting worker from the latest block");
 
-            // for the self.state_rx.changed()
-            let mut active_watch_addresses = start_state.watch_addresses.clone();
-            let mut active_tokens_map = start_state.tokens_map.clone();
-            let mut active_rpc_urls = start_state.dynamic_data.rpc_urls.clone();
-            let mut last_block_state = start_state.dynamic_data.last_processed_block;
-
             let mut interval = time::interval(Duration::from_millis(1500));
             interval.set_missed_tick_behavior(MissedTickBehavior::Delay);
 
@@ -164,71 +168,92 @@ impl BlockchainWorker for EvmBlockchainWorker {
 
             loop {
                 tokio::select! {
-                    _ = interval.tick() => {
-                        let tick_state = self.state_rx.borrow().clone();
+                    biased;
 
-                        if !tick_state.dynamic_data.active {
-                            trace!("Chain is not active. Skipping tick");
-                            continue
-                        }
+                    cmd_opt = self.state_rx.recv() => {
+                        let cmd = if let Some(c) = cmd_opt { c }
+                        else {
+                            warn!("State change channel closed. Exiting worker loop.");
+                            break
+                        };
 
-                        let current_block_num = match self.provider.get_block_number().await {
-                            Ok(n) => n,
-                            Err(e) => {
-                                warn!(error = %e, "Failed to get latest block number, retrying on next tick...");
-                                continue
+                        match cmd {
+                            StateCommand::AddWatchAddress(addr) => {
+                                match addr.parse::<Address>() {
+                                    Ok(addr) => {
+                                        self.watch_addresses.insert(addr);
+                                    }
+                                    Err(e) => {
+                                        warn!(watch_address = addr, error = %e,
+                                            "Failed to parse token watch_address as Address");
+                                    }
+                                }
+                            }
+                            StateCommand::RemoveWatchAddress(addr) => {
+                                match addr.parse::<Address>() {
+                                    Ok(addr) => {
+                                        self.watch_addresses.remove(&addr);
+                                    }
+                                    Err(e) => {
+                                        warn!(watch_address = addr, error = %e,
+                                            "Failed to parse token watch_address as Address");
+                                    }
+                                }
+                            }
+                            StateCommand::AddTokenData(token_data) => {
+                                let contract_address = token_data.contract.as_str();
+
+                                match contract_address.parse::<Address>() {
+                                    Ok(addr) => {
+                                        self.tokens_map.insert(addr, token_data);
+                                    }
+                                    Err(e) => {
+                                        warn!(contract_address, error = %e,
+                                            "Failed to parse token contract_address as Address");
+                                    }
+                                }
+                            }
+                            StateCommand::RemoveToken { contract_address } => {
+                                match contract_address.parse::<Address>() {
+                                    Ok(addr) => {
+                                        self.tokens_map.remove(&addr);
+                                    }
+                                    Err(e) => {
+                                        warn!(contract_address, error = %e,
+                                            "Failed to parse token contract_address as Address");
+                                    }
+                                }
+                            }
+                            StateCommand::ChangeActive(is_active) => {
+                                self.state.dynamic_data.active = is_active;
+                            }
+                            StateCommand::ChangeRpcUrls(rpc_urls) => {
+                                match create_fallback_provider(&rpc_urls) {
+                                    Ok(provider) => {
+                                        self.provider = provider;
+                                        debug!("Provider successfully updated with new RPC URLs");
+                                    }
+                                    Err(e) => {
+                                        warn!(error = %e, "Failed to create fallback provider. Error: {:?}", e)
+                                    }
+                                }
+                            }
+                            StateCommand::ChangeLastProcessedBlock(last_processed_block) => {
+                                latest_block_num = last_processed_block;
+                            }
+                            StateCommand::ChangeBlockLag(block_lag) => {
+                                self.state.dynamic_data.block_lag = block_lag;
+                            }
+                            StateCommand::ChangeSafeLag(safe_lag) => {
+                                self.state.dynamic_data.safe_lag = safe_lag;
+                            }
+                            StateCommand::ChangeRequiredConfirmations(req_confirm) => {
+                                self.state.dynamic_data.required_confirmations = req_confirm;
                             }
                         };
-                        let block_with_lag = current_block_num
-                            .saturating_sub(tick_state.dynamic_data.block_lag as u64);
-
-                        if block_with_lag <= latest_block_num {
-                            trace!(current = current_block_num, last = latest_block_num,
-                                "No new blocks, skipping tick...");
-                            continue
-                        }
-
-                        for block_num in (latest_block_num + 1)..=block_with_lag {
-                            let block_opt = match self.process_block(block_num).await
-                            {
-                                Ok(b) => Some(b),
-                                Err(e) => {
-                                    error!(error = %e, block_number = block_num,
-                                        "Failed to process block (very bad)");
-
-                                    None
-                                }
-                            };
-
-                            if let Some((block_hash, parent_hash)) = block_opt {
-                                self.process_blocks_reorg(block_num, parent_hash).await;
-                                self.process_tracked_transactions(block_num).await;
-
-                                let actual_lag = current_block_num - block_num;
-
-                                if let Err(e) = self.process_logs(block_hash, actual_lag).await {
-                                    error!(error = %e, block_number = block_num, block_hash = %block_hash,
-                                        "Failed to process logs for block");
-                                }
-
-                                if let Err(e) = self.event_tx.send(ChainEvent::BlockProcessed {
-                                    chain_name: tick_state.static_data.name.clone(),
-                                    block_number: block_num,
-                                    block_hash: block_hash.to_string(),
-                                }).await {
-                                    warn!(error = %e, block_number = block_num,
-                                        "Failed to send BlockProcessed event");
-                                }
-                            } else {
-                                warn!(block_number = block_num,
-                                    "Skipping logs because process_block returned error instead of transactions");
-                            }
-
-                            latest_block_num = block_num;
-                        }
                     }
 
-                    track_request_opt = self.transactions_rs.recv() => {
+                    track_request_opt = self.transactions_rx.recv() => {
                         let track = if let Some(r) = track_request_opt { r }
                         else {
                             warn!("Tracking transactions channel closed. Exiting worker loop.");
@@ -256,72 +281,72 @@ impl BlockchainWorker for EvmBlockchainWorker {
                             .insert(tracked_tx);
                     }
 
-                    change_result = self.state_rx.changed() => {
-                        if change_result.is_err() {
-                            warn!("State change channel closed. Exiting worker loop.");
-                            break
+                    _ = interval.tick() => {
+                        if !self.state.dynamic_data.active {
+                            trace!("Chain is not active. Skipping tick");
+                            continue
                         }
 
-                        let new_state = self.state_rx.borrow().clone();
-
-                        if new_state.dynamic_data.rpc_urls != active_rpc_urls {
-                            active_rpc_urls = new_state.dynamic_data.rpc_urls.clone();
-
-                            match create_fallback_provider(&active_rpc_urls) {
-                                Ok(provider) => {
-                                    self.provider = provider;
-                                    debug!("Provider successfully updated with new RPC URLs");
-                                }
-                                Err(e) => {
-                                    warn!(error = %e, "Failed to create fallback provider. Error: {:?}", e)
-                                }
+                        let current_block_num = match self.provider.get_block_number().await {
+                            Ok(n) => n,
+                            Err(e) => {
+                                warn!(error = %e, "Failed to get latest block number, retrying on next tick...");
+                                continue
                             }
+                        };
+                        let block_with_lag = current_block_num
+                            .saturating_sub(self.state.dynamic_data.block_lag as u64);
+
+                        if block_with_lag <= latest_block_num {
+                            trace!(current = current_block_num, last = latest_block_num,
+                                "No new blocks, skipping tick...");
+                            continue
                         }
 
-                        if new_state.dynamic_data.last_processed_block != last_block_state {
-                            latest_block_num = new_state.dynamic_data.last_processed_block;
-                            last_block_state = latest_block_num;
-                        }
-
-                        if new_state.tokens_map != active_tokens_map {
-                            let mut tokens_map = HashMap::with_capacity(
-                                new_state.tokens_map.len());
-
-                            for (k, v) in new_state.tokens_map.iter() {
-                                match k.parse::<Address>() {
-                                    Ok(addr) => {
-                                        tokens_map.insert(addr, v.clone());
-                                    }
-                                    Err(e) => {
-                                        warn!(contract_address = k, error = %e,
-                                            "Failed to parse token contract_address as Address");
-                                    }
-                                }
-                            }
-
-                            self.tokens_map = tokens_map;
-                            active_tokens_map = new_state.tokens_map.clone();
-                        }
-
-                        if new_state.watch_addresses != active_watch_addresses {
-                            let watch_addresses = match new_state.watch_addresses.iter()
-                                .map(|s| s.parse::<Address>())
-                                .collect::<Result<HashSet<_>, _>>()
+                        for block_num in (latest_block_num + 1)..=block_with_lag {
+                            let block_opt = match self.process_block(block_num).await
                             {
-                                Ok(addrs) => addrs,
+                                Ok(b) => Some(b),
                                 Err(e) => {
-                                    warn!(error = %e, "Failed to parse watch_addresses. Skipping changes.");
-                                    continue
+                                    error!(error = %e, block_number = block_num,
+                                        "Failed to process block (very bad)");
+
+                                    None
                                 }
                             };
 
-                            self.watch_addresses = watch_addresses;
-                            active_watch_addresses = new_state.watch_addresses.clone();
+                            if let Some((block_hash, parent_hash)) = block_opt {
+                                self.block_hashes.insert(block_num, block_hash.to_string());
+
+                                self.process_blocks_reorg(block_num, parent_hash).await;
+                                self.process_tracked_transactions(block_num).await;
+
+                                let actual_lag = current_block_num - block_num;
+
+                                if let Err(e) = self.process_logs(block_hash, actual_lag).await {
+                                    error!(error = %e, block_number = block_num, block_hash = %block_hash,
+                                        "Failed to process logs for block");
+                                }
+
+                                if let Err(e) = self.event_tx.send(ChainEvent::BlockProcessed {
+                                    chain_id: self.state.static_data.id,
+                                    chain_name: self.state.static_data.name.clone(),
+                                    block_number: block_num,
+                                    block_hash: block_hash.to_string(),
+                                }).await {
+                                    warn!(error = %e, block_number = block_num,
+                                        "Failed to send BlockProcessed event");
+                                }
+                            } else {
+                                warn!(block_number = block_num,
+                                    "Skipping logs because process_block returned error instead of transactions");
+                            }
+
+                            latest_block_num = block_num;
                         }
                     }
                 }
             }
-
         }.instrument(worker_span).await;
     }
 }
@@ -389,6 +414,7 @@ impl EvmBlockchainWorker {
             let block_hash = block.header.hash.to_string();
 
             reorged_blocks.push((block_number, block_hash.clone()));
+            self.block_hashes.insert(block_number, block_hash.clone());
 
             for tx in block.into_transactions_iter() {
                 let tx_hash = tx.tx_hash();
@@ -426,8 +452,8 @@ impl EvmBlockchainWorker {
             .map(|(_, tracked)| tracked.tx_hash)
             .collect();
 
-        let chain_id = self.state_rx.borrow().static_data.id;
-        
+        let chain_id = self.state.static_data.id;
+
         if let Err(e) = self.event_tx.send(ChainEvent::BlocksReorged {
             chain_id,
             new_blocks: reorged_blocks,
@@ -501,8 +527,6 @@ impl EvmBlockchainWorker {
         &self,
         block_number: u64
     ) -> anyhow::Result<(BlockHash, String)> {
-        let state = self.state_rx.borrow().clone();
-
         let block = self.get_block(block_number).await;
 
         let block_hash = block.header.hash;
@@ -521,9 +545,9 @@ impl EvmBlockchainWorker {
 
             if amount > U256::ZERO {
                 let from = tx.from().to_string();
-                let asset = Asset::Native(state.static_data.native_symbol.clone());
+                let asset = Asset::Native(self.state.static_data.native_symbol.clone());
                 let tx_hash = tx.tx_hash().to_string();
-                let amount_human = format_units(amount, state.static_data.decimals)
+                let amount_human = format_units(amount, self.state.static_data.decimals)
                     .unwrap_or_default();
 
                 info!(
@@ -536,7 +560,7 @@ impl EvmBlockchainWorker {
                 );
 
                 let event = ChainEvent::PaymentDetected {
-                    chain_name: state.static_data.name.clone(),
+                    chain_name: self.state.static_data.name.clone(),
                     tx_hash,
                     from,
                     to: address_to.to_string(),
@@ -546,7 +570,7 @@ impl EvmBlockchainWorker {
                     block_number,
                     block_hash: block_hash.to_string(),
                     log_index: None,
-                    required_confirmations: state.dynamic_data.required_confirmations,
+                    required_confirmations: self.state.dynamic_data.required_confirmations,
                 };
 
                 if let Err(e) = self.event_tx.send(event).await {
@@ -564,8 +588,6 @@ impl EvmBlockchainWorker {
         block_hash: BlockHash,
         actual_lag: u64,
     ) -> anyhow::Result<()> {
-        let state = self.state_rx.borrow().clone();
-
         if self.tokens_map.is_empty() {
             trace!("No tokens to watch, skipping log processing");
             return Ok(());
@@ -594,7 +616,7 @@ impl EvmBlockchainWorker {
             match self.provider.get_logs(&filter).await {
                 Ok(l) => {
                     if !l.is_empty()
-                        || actual_lag >= state.dynamic_data.safe_lag as u64 {
+                        || actual_lag >= self.state.dynamic_data.safe_lag as u64 {
                         break l
                     }
 
@@ -665,7 +687,7 @@ impl EvmBlockchainWorker {
                 );
 
                 let event = ChainEvent::PaymentDetected {
-                    chain_name: state.static_data.name.clone(),
+                    chain_name: self.state.static_data.name.clone(),
                     tx_hash,
                     from,
                     to: address_to.to_string(),
@@ -675,7 +697,7 @@ impl EvmBlockchainWorker {
                     block_number,
                     block_hash: block_hash.to_string(),
                     log_index: log.log_index,
-                    required_confirmations: state.dynamic_data.required_confirmations,
+                    required_confirmations: self.state.dynamic_data.required_confirmations,
                 };
 
                 if let Err(e) = self.event_tx.send(event).await {

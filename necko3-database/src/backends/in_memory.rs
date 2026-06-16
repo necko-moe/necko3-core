@@ -183,6 +183,10 @@ impl TokenStore for InMemoryAdapter {
     }
 
     async fn add_token(&self, chain_name: &str, token_config: &TokenData) -> anyhow::Result<()> {
+        if !self.chains.read().contains_key(chain_name) {
+            anyhow::bail!("Chain {} not found in DB", chain_name)
+        }
+
         self.tokens.write()
             .entry(chain_name.to_string())
             .or_default()
@@ -359,10 +363,17 @@ impl PaymentStore for InMemoryAdapter {
             .map(|x| x.value().clone()))
     }
 
-    async fn get_confirming_payments(&self) -> anyhow::Result<Vec<Payment>> {
+    async fn get_payment_by_tx_hash(&self, tx_hash: String) -> anyhow::Result<Option<Payment>> {
+        Ok(self.payments.iter()
+            .find(|payment|
+                payment.value().tx_hash == tx_hash)
+            .map(|x| x.value().clone()))
+    }
+
+    async fn get_payments_by_status(&self, status: PaymentStatus) -> anyhow::Result<Vec<Payment>> {
         Ok(self.payments.iter()
             .filter(|payment|
-                payment.value().status == PaymentStatus::Confirming)
+                payment.value().status == status)
             .map(|x| x.value().clone())
             .collect())
     }
@@ -379,6 +390,7 @@ impl PaymentStore for InMemoryAdapter {
         {
             existing.block_number = upsert.block_number;
             existing.block_hash = upsert.block_hash.clone();
+            existing.status = PaymentStatus::Confirming;
 
             return Ok((existing.id, false));
         }
@@ -400,11 +412,12 @@ impl PaymentStore for InMemoryAdapter {
         Ok(())
     }
 
-    async fn update_payment_block_number(&self, payment_id: Uuid, block_num: u64) -> anyhow::Result<()> {
+    async fn update_payment_block(&self, payment_id: Uuid, block_num: u64, block_hash: String) -> anyhow::Result<()> {
         if let Some(mut payment) = self.payments
             .get_mut(&payment_id)
         {
             payment.block_number = block_num;
+            payment.block_hash = block_hash;
         }
 
         Ok(())

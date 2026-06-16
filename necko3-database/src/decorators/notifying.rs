@@ -23,9 +23,9 @@ pub enum DbEvent {
     ChainWatchAddressesRemoved { chain_name: String, addresses: Vec<String> },
 
     IndexedBlocksUpserted { chain_id: i32, blocks: Vec<(BlockNumber, String)> },
-    
-    TokenAdded { token_data: TokenData },
-    TokenRemoved { token_data: TokenData },
+
+    TokenAdded { chain_name: String, token_data: TokenData },
+    TokenRemoved { chain_name: String, token_data: TokenData },
 
     InvoiceAdded { invoice: Invoice },
     InvoiceStatusUpdated { invoice_id: Uuid, new_status: InvoiceStatus },
@@ -35,7 +35,7 @@ pub enum DbEvent {
 
     PaymentUpserted { payment_id: Uuid, payment: UpsertPayment, is_new_payment: bool },
     PaymentStatusUpdated { payment_id: Uuid, new_status: PaymentStatus },
-    PaymentBlockUpdated { payment_id: Uuid, block_number: u64 },
+    PaymentBlockUpdated { payment_id: Uuid, block_number: u64, block_hash: String },
 
     WebhookAdded { webhook: Webhook },
     PendingWebhooksSelected { webhook_jobs: Vec<WebhookJob>, prompted_limit: usize },
@@ -192,6 +192,7 @@ impl<D: DatabaseExt> TokenStore for NotifyingDb<D> {
 
         if let Some(ref token) = result {
             let _ = self.tx.send(DbEvent::TokenRemoved {
+                chain_name: chain_name.to_string(),
                 token_data: token.clone(),
             }).await;
         }
@@ -203,6 +204,7 @@ impl<D: DatabaseExt> TokenStore for NotifyingDb<D> {
         self.inner.add_token(chain_name, token_config).await?;
 
         let _ = self.tx.send(DbEvent::TokenAdded {
+            chain_name: chain_name.to_string(),
             token_data: token_config.clone(),
         }).await;
 
@@ -289,8 +291,12 @@ impl<D: DatabaseExt> PaymentStore for NotifyingDb<D> {
         self.inner.get_payment(payment_id).await
     }
 
-    async fn get_confirming_payments(&self) -> anyhow::Result<Vec<Payment>> {
-        self.inner.get_confirming_payments().await
+    async fn get_payment_by_tx_hash(&self, tx_hash: String) -> anyhow::Result<Option<Payment>> {
+        self.inner.get_payment_by_tx_hash(tx_hash).await
+    }
+
+    async fn get_payments_by_status(&self, status: PaymentStatus) -> anyhow::Result<Vec<Payment>> {
+        self.inner.get_payments_by_status(status).await
     }
 
     async fn upsert_payment(&self, payment: &UpsertPayment) -> anyhow::Result<(Uuid, bool)> {
@@ -316,12 +322,13 @@ impl<D: DatabaseExt> PaymentStore for NotifyingDb<D> {
         Ok(())
     }
 
-    async fn update_payment_block_number(&self, payment_id: Uuid, block_num: u64) -> anyhow::Result<()> {
-        self.inner.update_payment_block_number(payment_id, block_num).await?;
+    async fn update_payment_block(&self, payment_id: Uuid, block_num: u64, block_hash: String) -> anyhow::Result<()> {
+        self.inner.update_payment_block(payment_id, block_num, block_hash.clone()).await?;
 
         let _ = self.tx.send(DbEvent::PaymentBlockUpdated {
             payment_id,
             block_number: block_num,
+            block_hash,
         }).await;
 
         Ok(())
@@ -423,22 +430,24 @@ impl<D: DatabaseExt> IndexedBlocksStore for NotifyingDb<D> {
 
 #[async_trait]
 impl<D: DatabaseExt> DatabaseExt for NotifyingDb<D> {
-    async fn finalize_payment(&self, payment_id: Uuid) -> anyhow::Result<FinalizedPaymentInfo> {
-        let info = self.inner.finalize_payment(payment_id).await?;
+    async fn finalize_payment(&self, payment_id: Uuid) -> anyhow::Result<Option<FinalizedPaymentInfo>> {
+        let info_opt = self.inner.finalize_payment(payment_id).await?;
 
         let _ = self.tx.send(DbEvent::PaymentStatusUpdated {
             payment_id,
             new_status: PaymentStatus::Confirmed
         }).await;
 
-        let _ = self.tx.send(DbEvent::InvoicePaymentApplied {
-            invoice_id: info.invoice_id,
-            paid_raw_before: info.paid_raw_before,
-            paid_raw_after: info.paid_raw_after,
-            old_status: info.old_invoice_status,
-            new_status: info.new_invoice_status,
-        }).await;
+        if let Some(info) = &info_opt {
+            let _ = self.tx.send(DbEvent::InvoicePaymentApplied {
+                invoice_id: info.invoice_id,
+                paid_raw_before: info.paid_raw_before,
+                paid_raw_after: info.paid_raw_after,
+                old_status: info.old_invoice_status,
+                new_status: info.new_invoice_status,
+            }).await;
+        }
 
-        Ok(info)
+        Ok(info_opt)
     }
 }

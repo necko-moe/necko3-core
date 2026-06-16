@@ -4,7 +4,7 @@ use uuid::Uuid;
 
 #[derive(Debug, Clone)]
 pub enum CoreEvent {
-    NewTransaction {
+    TransactionDetected {
         db_transaction_id: Uuid,
         tx_hash: String,
 
@@ -29,5 +29,19 @@ pub enum CoreEvent {
         block_number: u64,
         block_hash: String,
         confirmed_after: u64,
+    },
+
+    TransactionReorged {
+        db_transaction_id: Uuid,
+        tx_hash: String,
+    },
+
+    TransactionFailed {
+        db_transaction_id: Uuid,
+        tx_hash: String,
+    },
+
+    TransactionLost {
+        tx_hash: String,
     }
 }

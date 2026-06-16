@@ -1,8 +1,6 @@
 use crate::{ChainData, ChainType, TokenData};
 use alloy_primitives::{BlockNumber, U256};
 use serde::{Deserialize, Serialize};
-use std::collections::{HashMap, HashSet};
-use std::sync::Arc;
 use strum::Display;
 
 #[derive(Display, Debug, Clone)]
@@ -51,6 +49,7 @@ pub enum ChainEvent {
     },
 
     BlockProcessed {
+        chain_id: i32,
         chain_name: String,
         block_number: u64,
         block_hash: String,
@@ -70,13 +69,13 @@ pub struct ChainStaticData {
     pub chain_type: ChainType,
     pub native_symbol: String,
     pub decimals: u8,
+    pub starting_block_num: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ChainDynamicData {
     pub active: bool,
     pub rpc_urls: Vec<String>,
-    pub last_processed_block: u64,
     pub block_lag: u8,
     pub safe_lag: u8,
     pub required_confirmations: u64
@@ -90,12 +89,12 @@ impl From<ChainData> for (ChainStaticData, ChainDynamicData) {
             chain_type: chain.chain_type,
             native_symbol: chain.native_symbol,
             decimals: chain.decimals,
+            starting_block_num: chain.last_processed_block,
         };
 
         let dynamic_data = ChainDynamicData {
             active: chain.active,
             rpc_urls: chain.rpc_urls,
-            last_processed_block: chain.last_processed_block,
             block_lag: chain.block_lag,
             safe_lag: chain.safe_lag,
             required_confirmations: chain.required_confirmations,
@@ -107,12 +106,15 @@ impl From<ChainData> for (ChainStaticData, ChainDynamicData) {
 
 #[derive(Debug, Clone)]
 pub struct ChainState {
-    pub static_data: Arc<ChainStaticData>,
-    pub dynamic_data: Arc<ChainDynamicData>,
+    pub static_data: ChainStaticData,
+    pub dynamic_data: ChainDynamicData,
+}
 
-    /// key = contract_address
-    pub tokens_map: Arc<HashMap<String, TokenData>>,
-    pub watch_addresses: Arc<HashSet<String>>,
+impl From<ChainData> for ChainState {
+    fn from(value: ChainData) -> Self {
+        let (static_data, dynamic_data) = value.into();
+        Self { static_data, dynamic_data }
+    }
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -123,3 +125,18 @@ pub struct TrackTransaction {
     pub confirm_after: u64,
 }
 
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub enum StateCommand {
+    AddWatchAddress(String),
+    RemoveWatchAddress(String),
+
+    AddTokenData(TokenData),
+    RemoveToken { contract_address: String },
+
+    ChangeActive(bool),
+    ChangeRpcUrls(Vec<String>),
+    ChangeLastProcessedBlock(u64),
+    ChangeBlockLag(u8),
+    ChangeSafeLag(u8),
+    ChangeRequiredConfirmations(u64),
+}

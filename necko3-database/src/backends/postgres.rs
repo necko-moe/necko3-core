@@ -797,12 +797,25 @@ impl PaymentStore for PostgresAdapter {
             .transpose()
     }
 
-    async fn get_confirming_payments(&self) -> anyhow::Result<Vec<Payment>> {
+    async fn get_payment_by_tx_hash(&self, tx_hash: String) -> anyhow::Result<Option<Payment>> {
+        sqlx::query(
+            r#"SELECT id, "from", "to", network, tx_hash, token, amount_raw::TEXT,
+                       block_number, block_hash::TEXT, status, created_at, log_index
+                   FROM payments WHERE tx_hash = $1"#
+        )
+            .bind(tx_hash)
+            .fetch_optional(&self.pool)
+            .await?
+            .map(Self::map_row_to_payment)
+            .transpose()
+    }
+
+    async fn get_payments_by_status(&self, status: PaymentStatus) -> anyhow::Result<Vec<Payment>> {
         let rows = sqlx::query(
             r#"SELECT id, "from", "to", network, tx_hash, token, amount_raw::TEXT,
                        block_number, block_hash::TEXT, status, created_at, log_index
                    FROM payments WHERE status = $1"#)
-            .bind(PaymentStatus::Confirming.as_ref())
+            .bind(status.as_ref())
             .fetch_all(&self.pool)
             .await?;
 
@@ -817,7 +830,9 @@ impl PaymentStore for PostgresAdapter {
                       block_number, block_hash, status, log_index, token)
                    VALUES ($1, $2, $3, $4, $5, $6, $7, 'Confirming', $9, $10)
                    ON CONFLICT (tx_hash, log_index, network)
-                   DO UPDATE SET block_number = excluded.block_number
+                   DO UPDATE SET block_number = excluded.block_number,
+                                 block_hash = excluded.block_hash,
+                                 status = 'Confirming'
                    RETURNING id, (xmax = 0) AS inserted"#
         )
             .bind(&payment.from)
@@ -850,9 +865,12 @@ impl PaymentStore for PostgresAdapter {
         Ok(())
     }
 
-    async fn update_payment_block_number(&self, payment_id: Uuid, block_num: u64) -> anyhow::Result<()> {
-        sqlx::query("UPDATE payments SET block_number = $1 WHERE id = $2")
+    async fn update_payment_block(&self, payment_id: Uuid, block_num: u64, block_hash: String) -> anyhow::Result<()> {
+        sqlx::query(
+            "UPDATE payments SET block_number = $1, block_hash = $2 WHERE id = $3"
+        )
             .bind(block_num as i64)
+            .bind(block_hash)
             .bind(payment_id)
             .execute(&self.pool)
             .await?;
@@ -1096,7 +1114,7 @@ impl IndexedBlocksStore for PostgresAdapter {
 
 #[async_trait]
 impl DatabaseExt for PostgresAdapter {
-    async fn finalize_payment(&self, payment_id: Uuid) -> anyhow::Result<FinalizedPaymentInfo> {
+    async fn finalize_payment(&self, payment_id: Uuid) -> anyhow::Result<Option<FinalizedPaymentInfo>> {
         let mut tx = self.pool.begin().await?;
 
         let row = sqlx::query(
@@ -1110,7 +1128,7 @@ impl DatabaseExt for PostgresAdapter {
         let to_address: String = row.get("to");
         let pay_amount_bd = BigDecimal::from_str(&row.get::<String, _>("amount_raw"))?;
 
-        let inv = sqlx::query(
+        let inv_opt = sqlx::query(
             r#"UPDATE invoices SET paid_raw = paid_raw + $1 WHERE address = $2
                    RETURNING (paid_raw - $1)::TEXT as old_paid_raw,
                        paid_raw::TEXT as new_paid_raw,
@@ -1120,41 +1138,74 @@ impl DatabaseExt for PostgresAdapter {
         )
             .bind(pay_amount_bd)
             .bind(to_address)
-            .fetch_one(&mut *tx)
+            .fetch_optional(&mut *tx)
             .await?;
 
-        let inv_paid_before = U256::from_str(&inv.get::<String, _>("old_paid_raw"))
-            .map_err(|e| anyhow::anyhow!("Failed to parse old_paid_raw: {}", e))?;
-        let inv_paid_after = U256::from_str(&inv.get::<String, _>("new_paid_raw"))
-            .map_err(|e| anyhow::anyhow!("Failed to parse new_paid_raw: {}", e))?;
-        let inv_amount = U256::from_str(&inv.get::<String, _>("amount_raw"))
-            .map_err(|e| anyhow::anyhow!("Failed to parse amount_raw: {}", e))?;
+        if let Some(inv) = inv_opt {
+            let inv_paid_before = U256::from_str(&inv.get::<String, _>("old_paid_raw"))
+                .map_err(|e| anyhow::anyhow!("Failed to parse old_paid_raw: {}", e))?;
+            let inv_paid_after = U256::from_str(&inv.get::<String, _>("new_paid_raw"))
+                .map_err(|e| anyhow::anyhow!("Failed to parse new_paid_raw: {}", e))?;
+            let inv_amount = U256::from_str(&inv.get::<String, _>("amount_raw"))
+                .map_err(|e| anyhow::anyhow!("Failed to parse amount_raw: {}", e))?;
 
-        let old_status_str: String = inv.get("status");
-        let old_status: InvoiceStatus = old_status_str.parse()
-            .map_err(|e| anyhow::anyhow!("Unknown invoice status '{}' from DB: {}", old_status_str, e))?;
+            let old_status_str: String = inv.get("status");
+            let old_status: InvoiceStatus = old_status_str.parse()
+                .map_err(|e| anyhow::anyhow!("Unknown invoice status '{}' from DB: {}", old_status_str, e))?;
 
-        let inv_id: Uuid = inv.get("id");
+            let inv_id: Uuid = inv.get("id");
 
-        let is_fully_paid = inv_paid_after >= inv_amount;
-        let new_status = if is_fully_paid {
-            sqlx::query("UPDATE invoices SET status = 'Paid' WHERE id = $1")
-                .bind(inv_id)
-                .execute(&mut *tx)
-                .await?;
+            let is_fully_paid = inv_paid_after >= inv_amount;
+            let new_status = if is_fully_paid {
+                sqlx::query("UPDATE invoices SET status = 'Paid' WHERE id = $1")
+                    .bind(inv_id)
+                    .execute(&mut *tx)
+                    .await?;
 
-            InvoiceStatus::Paid
-        } else { old_status };
+                InvoiceStatus::Paid
+            } else { old_status };
 
-        tx.commit().await?;
+            tx.commit().await?;
 
-        Ok(FinalizedPaymentInfo {
-            is_fully_paid,
-            invoice_id: inv_id,
-            paid_raw_before: inv_paid_before,
-            paid_raw_after: inv_paid_after,
-            old_invoice_status: old_status,
-            new_invoice_status: new_status,
-        })
+            Ok(Some(FinalizedPaymentInfo {
+                is_fully_paid,
+                invoice_id: inv_id,
+                paid_raw_before: inv_paid_before,
+                paid_raw_after: inv_paid_after,
+                old_invoice_status: old_status,
+                new_invoice_status: new_status,
+            }))
+        } else {
+            tx.commit().await?;
+
+            Ok(None)
+        }
+    }
+
+    async fn mark_txs_as_pending(&self, tx_hashes: &[String]) -> anyhow::Result<Vec<String>> {
+        if tx_hashes.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let updated: Vec<String> = sqlx::query_scalar(
+            r#"UPDATE payments SET status = 'Pending'
+                   WHERE tx_hash = ANY($1)
+                   RETURNING tx_hash"#
+        )
+            .bind(tx_hashes)
+            .fetch_all(&self.pool)
+            .await?;
+
+        let updated_set = updated.iter()
+            .map(|s| s.as_str())
+            .collect::<HashSet<_>>();
+
+        let skipped = tx_hashes
+            .iter()
+            .filter(|tx_hash| !updated_set.contains(tx_hash.as_str()))
+            .cloned()
+            .collect();
+
+        Ok(skipped)
     }
 }
