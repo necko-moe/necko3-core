@@ -1,2 +1,2 @@
 pub mod postgres;
-pub mod mock;
+pub mod in_memory;

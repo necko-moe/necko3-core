@@ -1,5 +1,5 @@
 use crate::{ChainData, ChainType, TokenData};
-use alloy_primitives::{BlockHash, BlockNumber, B256, U256};
+use alloy_primitives::{BlockNumber, U256};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -15,6 +15,8 @@ pub enum Asset {
 #[derive(Debug, Clone)]
 pub enum ChainEvent {
     PaymentDetected {
+        chain_name: String,
+
         tx_hash: String,
         from: String,
         to: String,
@@ -23,7 +25,7 @@ pub enum ChainEvent {
         amount_human: String,
         block_number: u64,
 
-        block_hash: B256,
+        block_hash: String,
         log_index: Option<u64>,
 
         required_confirmations: u64,
@@ -33,14 +35,14 @@ pub enum ChainEvent {
         tx_hash: String,
         old_block_number: u64,
         new_block_number: u64,
-        old_block_hash: B256,
-        new_block_hash: B256,
+        old_block_hash: String,
+        new_block_hash: String,
     },
 
     PaymentConfirmed {
         tx_hash: String,
         block_number: u64,
-        block_hash: B256,
+        block_hash: String,
         confirmed_after: u64,
     },
 
@@ -49,20 +51,21 @@ pub enum ChainEvent {
     },
 
     BlockProcessed {
+        chain_name: String,
         block_number: u64,
-        block_hash: B256,
+        block_hash: String,
     },
 
     BlocksReorged {
-        new_blocks: Vec<(BlockNumber, BlockHash)>, 
+        chain_id: i32,
+        new_blocks: Vec<(BlockNumber, String)>,
         pending_transactions: Vec<String> // tx_hash
     },
-
-    FatalError(String),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ChainStaticData {
+    pub id: i32,
     pub name: String,
     pub chain_type: ChainType,
     pub native_symbol: String,
@@ -82,6 +85,7 @@ pub struct ChainDynamicData {
 impl From<ChainData> for (ChainStaticData, ChainDynamicData) {
     fn from(chain: ChainData) -> Self {
         let static_data = ChainStaticData {
+            id: chain.id,
             name: chain.name,
             chain_type: chain.chain_type,
             native_symbol: chain.native_symbol,
@@ -106,17 +110,16 @@ pub struct ChainState {
     pub static_data: Arc<ChainStaticData>,
     pub dynamic_data: Arc<ChainDynamicData>,
 
+    /// key = contract_address
     pub tokens_map: Arc<HashMap<String, TokenData>>,
     pub watch_addresses: Arc<HashSet<String>>,
-
-    pub block_hashes: Arc<HashMap<BlockNumber, BlockHash>>
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct TrackTransaction {
     pub tx_hash: String,
     pub block_number: u64,
-    pub block_hash: B256,
+    pub block_hash: String,
     pub confirm_after: u64,
 }
 

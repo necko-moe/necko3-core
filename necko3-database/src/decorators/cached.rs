@@ -1,6 +1,6 @@
 use crate::model::{ChainData, ExpiredInvoiceInfo, Invoice, InvoiceFilter, InvoiceStatus, PaginatedVec, PartialChainUpdate, Payment, PaymentFilter, PaymentStatus, TokenData, Webhook, WebhookFilter, WebhookJob, WebhookStatus};
-use crate::traits::{ChainStore, DatabaseExt, InvoiceStore, PaymentStore, TokenStore, WebhookStore, XPubStore};
-use alloy_primitives::U256;
+use crate::traits::{ChainStore, DatabaseExt, IndexedBlocksStore, InvoiceStore, PaymentStore, TokenStore, WebhookStore, XPubStore};
+use alloy_primitives::{BlockNumber, U256};
 use arc_swap::{ArcSwap, ArcSwapOption};
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
@@ -8,9 +8,16 @@ use dashmap::DashMap;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use uuid::Uuid;
+use necko3_types::UpsertPayment;
 
+/// Apply this only to the adapter.
+///
+/// **Examples:**
+/// * `NotifyingDb<CachedDb<D>>` (where D: DatabaseExt + Sized)
+/// * `CachedDb<PostgresAdapter>`
+/// * `NotifyingDb<NotifyingDb<CachedDb<InMemoryAdapter>>>`
 pub struct CachedDb<D> {
-    inner: Arc<D>,
+    inner: D,
 
     chains_cache: ArcSwapOption<HashMap<String, ChainData>>,
     tokens_cache: ArcSwap<TokenCacheState>,
@@ -33,7 +40,7 @@ struct TokenCacheState {
 }
 
 impl<D> CachedDb<D> {
-    pub fn with(inner: Arc<D>) -> Self {
+    pub fn new(inner: D) -> Self {
         Self {
             inner,
             chains_cache: ArcSwapOption::empty(),
@@ -44,7 +51,7 @@ impl<D> CachedDb<D> {
         }
     }
 
-    pub fn inner(&self) -> &Arc<D> {
+    pub fn inner(&self) -> &D {
         &self.inner
     }
 }
@@ -436,7 +443,7 @@ impl<D: DatabaseExt> PaymentStore for CachedDb<D> {
         self.inner.get_confirming_payments().await
     }
 
-    async fn upsert_payment(&self, payment: &Payment) -> anyhow::Result<bool> {
+    async fn upsert_payment(&self, payment: &UpsertPayment) -> anyhow::Result<(Uuid, bool)> {
         self.inner.upsert_payment(payment).await
     }
 
@@ -480,6 +487,21 @@ impl<D: DatabaseExt> WebhookStore for CachedDb<D> {
 impl<D: DatabaseExt> XPubStore for CachedDb<D> {
     async fn next_derivation_index(&self, xpub: &str) -> anyhow::Result<u64> {
         self.inner.next_derivation_index(xpub).await
+    }
+}
+
+#[async_trait]
+impl<D: DatabaseExt> IndexedBlocksStore for CachedDb<D> {
+    async fn get_latest_indexed_blocks(&self, chain_id: i32, limit: u16) -> anyhow::Result<HashMap<BlockNumber, String>> {
+        self.inner.get_latest_indexed_blocks(chain_id, limit).await
+    }
+
+    async fn upsert_indexed_block(&self, chain_id: i32, block_number: u64, block_hash: String) -> anyhow::Result<()> {
+        self.inner.upsert_indexed_block(chain_id, block_number, block_hash).await
+    }
+
+    async fn upsert_indexed_blocks_batch(&self, chain_id: i32, blocks: &[(BlockNumber, String)]) -> anyhow::Result<()> {
+        self.inner.upsert_indexed_blocks_batch(chain_id, blocks).await
     }
 }
 

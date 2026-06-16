@@ -1,4 +1,4 @@
-use alloy_primitives::{BlockHash, U256};
+use alloy_primitives::U256;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use sqlx::types::Json;
@@ -148,7 +148,7 @@ pub struct PaymentFilter {
     pub network: Option<String>,
     pub token: Option<String>,
     pub block_number: Option<u64>,
-    pub block_hash: Option<BlockHash>,
+    pub block_hash: Option<String>,
     pub status: Option<PaymentStatus>,
 
     pub pagination: Pagination,

@@ -1,17 +1,15 @@
 use std::collections::{HashMap, HashSet};
 use std::hash::Hash;
 use std::str::FromStr;
-use std::sync::Arc;
 use std::time::Duration;
-use alloy::consensus::{BlockHeader, Transaction};
+use alloy::consensus::Transaction;
 use alloy::core::sol;
-use alloy::network::{AnyNetwork, AnyRpcBlock, ReceiptResponse, TransactionResponse};
-use alloy::primitives::{Address, BlockHash, BlockNumber, TxHash, B256, U256};
+use alloy::network::{AnyNetwork, AnyRpcBlock, TransactionResponse};
+use alloy::primitives::{Address, BlockHash, BlockNumber, TxHash, U256};
 use alloy::primitives::utils::format_units;
 use alloy::providers::{DynProvider, Provider};
 use alloy::rpc::types::Filter;
 use alloy::sol_types::SolEvent;
-use arc_swap::ArcSwap;
 use async_trait::async_trait;
 use coins_bip32::prelude::{Parent, XPub};
 use tokio::sync::{mpsc, watch};
@@ -24,30 +22,19 @@ use crate::backends::create_fallback_provider;
 use crate::traits::adapter::BlockchainAdapter;
 use crate::traits::worker::BlockchainWorker;
 
+pub const MAX_REORG_DEPTH: u64 = 100;
+
 sol! {
     #[derive(Debug)]
     event Transfer(address indexed from, address indexed to, uint256 value);
 }
 
-pub struct EvmBlockchain {
-    provider: ArcSwap<DynProvider<AnyNetwork>>,
-}
+pub struct EvmBlockchain;
 
 #[async_trait]
 impl BlockchainAdapter for EvmBlockchain {
-    #[instrument(level = "warn")]
-    fn with_rpc_urls(rpc_urls: Vec<String>) -> anyhow::Result<Self> {
-        let provider = create_fallback_provider(&rpc_urls)?;
-
-        Ok(Self { provider: ArcSwap::new(Arc::new(provider)) })
-    }
-
-    fn with_rpc_url(rpc_url: String) -> anyhow::Result<Self> {
-        Self::with_rpc_urls(vec![rpc_url])
-    }
-
     #[instrument(level = "debug")]
-        fn derive_address(xpub: String, index: u32) -> anyhow::Result<String> {
+    fn derive_address(xpub: String, index: u32) -> anyhow::Result<String> {
         trace!("Deriving address for index {}", index);
 
         let xpub = XPub::from_str(&xpub)?;
@@ -59,43 +46,20 @@ impl BlockchainAdapter for EvmBlockchain {
         Ok(addr)
     }
 
-    #[instrument(skip(self), err)]
-    async fn get_tx_block_number(&self, tx_hash: &str) -> anyhow::Result<Option<(BlockNumber, BlockHash)>> {
-        debug!(tx_hash, "Checking transaction receipt");
-        let hash = tx_hash.parse::<TxHash>()?;
-
-        match self.provider.load().get_transaction_receipt(hash).await {
-            Ok(Some(receipt)) => {
-                if receipt.status() {
-                    Ok(receipt.block_number.zip(receipt.block_hash))
-                } else {
-                    debug!("Transaction failed on-chain");
-                    Ok(None)
-                }
-            }
-            Ok(None) => {
-                debug!("Transaction receipt not found (yet)");
-                Ok(None)
-            }
-            Err(e) => {
-                anyhow::bail!("All RPC nodes failed inside FallbackLayer. Error: {:?}", e)
-            }
-        }
-    }
-
     fn build_worker(
+        block_hashes: HashMap<BlockNumber, String>,
         state_rx: watch::Receiver<ChainState>,
-        transactions_rs: mpsc::Receiver<TrackTransaction>,
+        transactions_rx: mpsc::Receiver<TrackTransaction>,
         event_tx: mpsc::Sender<ChainEvent>
     ) -> anyhow::Result<impl BlockchainWorker> {
-        EvmBlockchainWorker::new(state_rx, transactions_rs, event_tx)
+        EvmBlockchainWorker::new(block_hashes, state_rx, transactions_rx, event_tx)
     }
 }
 
 #[derive(Debug, Clone, Eq, PartialEq, Hash)]
 struct TrackedTx {
     tx_hash: String,
-    block_hash: B256,
+    block_hash: String,
     block_number: u64,
 }
 
@@ -107,6 +71,8 @@ pub struct EvmBlockchainWorker {
     tracked_txs: HashMap<BlockNumber, HashSet<TrackedTx>>,
     tx_block_map: HashMap<TxHash, (BlockNumber, TrackedTx)>,
 
+    block_hashes: HashMap<BlockNumber, String>,
+
     state_rx: watch::Receiver<ChainState>,
     watch_addresses: HashSet<Address>,
     tokens_map: HashMap<Address, TokenData>,
@@ -116,8 +82,9 @@ pub struct EvmBlockchainWorker {
 
 impl EvmBlockchainWorker {
     pub fn new(
+        block_hashes: HashMap<BlockNumber, String>,
         state_rx: watch::Receiver<ChainState>,
-        transactions_rs: mpsc::Receiver<TrackTransaction>,
+        transactions_rx: mpsc::Receiver<TrackTransaction>,
         event_tx: mpsc::Sender<ChainEvent>
     ) -> anyhow::Result<Self> {
         let state = state_rx.borrow().clone();
@@ -148,10 +115,11 @@ impl EvmBlockchainWorker {
 
         Ok(Self {
             provider,
-            transactions_rs,
+            transactions_rs: transactions_rx,
             tracked_txs: HashMap::new(),
             watch_addresses,
             tokens_map,
+            block_hashes,
             state_rx,
             event_tx,
             tx_block_map: Default::default(),
@@ -199,6 +167,11 @@ impl BlockchainWorker for EvmBlockchainWorker {
                     _ = interval.tick() => {
                         let tick_state = self.state_rx.borrow().clone();
 
+                        if !tick_state.dynamic_data.active {
+                            trace!("Chain is not active. Skipping tick");
+                            continue
+                        }
+
                         let current_block_num = match self.provider.get_block_number().await {
                             Ok(n) => n,
                             Err(e) => {
@@ -238,11 +211,10 @@ impl BlockchainWorker for EvmBlockchainWorker {
                                         "Failed to process logs for block");
                                 }
 
-                                latest_block_num = block_num;
-
                                 if let Err(e) = self.event_tx.send(ChainEvent::BlockProcessed {
+                                    chain_name: tick_state.static_data.name.clone(),
                                     block_number: block_num,
-                                    block_hash,
+                                    block_hash: block_hash.to_string(),
                                 }).await {
                                     warn!(error = %e, block_number = block_num,
                                         "Failed to send BlockProcessed event");
@@ -252,7 +224,7 @@ impl BlockchainWorker for EvmBlockchainWorker {
                                     "Skipping logs because process_block returned error instead of transactions");
                             }
 
-                            // hell yeah, just go over again
+                            latest_block_num = block_num;
                         }
                     }
 
@@ -358,61 +330,76 @@ impl EvmBlockchainWorker {
     async fn process_blocks_reorg(
         &mut self,
         latest_block_number: u64,
-        latest_parent_hash: B256,
+        latest_parent_hash: String,
     ) {
-        let state = self.state_rx.borrow().clone();
-
-        let prev_hash = state.block_hashes.get(&(latest_block_number - 1));
+        let prev_hash = self.block_hashes.get(&(latest_block_number - 1));
         if prev_hash.is_none() || prev_hash.unwrap() == &latest_parent_hash {
             return; // well not my problem if block_hashes are empty
         }
 
-        let mut reorged_blocks: Vec<(BlockNumber, BlockHash)> = vec![];
-        let mut pending_transactions: HashSet<String> = HashSet::new();
-
         let mut prev_block_num = latest_block_number - 1;
+        let mut new_blocks: Vec<AnyRpcBlock> = Vec::new();
 
-        let mut stop = false;
-        while prev_block_num != 0 && !stop {
+        let mut depth = 0;
+
+        while prev_block_num != 0 && depth < MAX_REORG_DEPTH {
             let block = self.get_block(prev_block_num).await;
-            let block_hash = block.header.hash;
-            let parent_hash = block.header.parent_hash;
+            let block_hash = block.header.hash.to_string();
 
-            let prev_hash = state.block_hashes.get(&(prev_block_num - 1));
-            match prev_hash {
-                Some(ph) if ph != &parent_hash => {
-                    reorged_blocks.push((block.header.number(), block_hash));
+            new_blocks.push(block);
 
-                    let txs_on_block = self.tracked_txs.values()
-                        .flat_map(|set| set.iter()
-                            .filter(|tx| tx.block_number == prev_block_num)
-                            .map(|tx| tx.tx_hash.clone()))
-                        .collect::<Vec<_>>();
-
-                    for tx in txs_on_block {
-                        pending_transactions.insert(tx);
-                    }
-                }
-                _ => stop = true,
+            if self.block_hashes.get(&prev_block_num) == Some(&block_hash) {
+                new_blocks.pop();
+                break
             }
+
+            prev_block_num -= 1;
+            depth += 1;
+        }
+
+        if depth >= MAX_REORG_DEPTH {
+            warn!("Reorg depth is more than 100! That's bad.")
+        }
+
+        let dead_blocks_from = prev_block_num + 1; // everything above is DEAD (reorged)
+
+        let mut dead_txs_info = HashMap::new();
+
+        self.tx_block_map.retain(|tx_hash, (confirm_on, tracked_tx)| {
+            if tracked_tx.block_number >= dead_blocks_from {
+                dead_txs_info.insert(*tx_hash, (*confirm_on, tracked_tx.clone()));
+                false
+            } else { true }
+        });
+
+        for (old_confirm_on, tracked) in dead_txs_info.values() {
+            if let Some(tx_set) = self.tracked_txs.get_mut(old_confirm_on) {
+                tx_set.remove(tracked);
+
+                if tx_set.is_empty() {
+                    self.tracked_txs.remove(old_confirm_on);
+                }
+            }
+        }
+
+        let mut reorged_blocks = Vec::new();
+
+        for block in new_blocks.into_iter().rev() { // from old to new
+            let block_number = block.number();
+            let block_hash = block.header.hash.to_string();
+
+            reorged_blocks.push((block_number, block_hash.clone()));
 
             for tx in block.into_transactions_iter() {
                 let tx_hash = tx.tx_hash();
 
-                if let Some((confirm_on, tracked)) = self.tx_block_map.remove(&tx_hash) {
-                    let old_removed = self.tracked_txs.get_mut(&confirm_on)
-                        .is_some_and(|tracked_txs| tracked_txs.remove(&tracked));
+                if let Some((confirm_on, tracked)) = dead_txs_info.remove(&tx_hash) {
+                    let new_confirm_on = block_number + (confirm_on - tracked.block_number);
 
-                    if !old_removed {
-                        warn!(tx_block_map_key = %tx_hash, tracked_txs_key = confirm_on,
-                            "self.tracked_txs and self.tx_block_map out of sync");
-                    }
-
-                    let new_confirm_on = prev_block_num + (confirm_on - tracked.block_number);
                     let new_tracked_tx = TrackedTx {
                         tx_hash: tx_hash.to_string(),
-                        block_hash,
-                        block_number: prev_block_num,
+                        block_hash: block_hash.clone(),
+                        block_number,
                     };
 
                     self.tx_block_map.insert(tx_hash, (new_confirm_on, new_tracked_tx.clone()));
@@ -421,26 +408,30 @@ impl EvmBlockchainWorker {
                         .insert(new_tracked_tx);
 
                     if let Err(e) = self.event_tx.send(ChainEvent::PaymentReorged {
-                        tx_hash: tx_hash.to_string(),
+                        tx_hash: tracked.tx_hash,
                         old_block_number: tracked.block_number,
-                        new_block_number: prev_block_num,
+                        new_block_number: block_number,
                         old_block_hash: tracked.block_hash,
-                        new_block_hash: block_hash,
+                        new_block_hash: block_hash.clone(),
                     }).await {
                         warn!(error = %e, tx_hash = %tx_hash,
                             "Failed to send PaymentReorged event");
                     };
-
-                    pending_transactions.remove(&tx_hash.to_string());
                 }
             }
-
-            prev_block_num -= 1;
         }
 
+        let pending_transactions: Vec<String> = dead_txs_info
+            .into_values()
+            .map(|(_, tracked)| tracked.tx_hash)
+            .collect();
+
+        let chain_id = self.state_rx.borrow().static_data.id;
+        
         if let Err(e) = self.event_tx.send(ChainEvent::BlocksReorged {
+            chain_id,
             new_blocks: reorged_blocks,
-            pending_transactions: pending_transactions.into_iter().collect(),
+            pending_transactions,
         }).await {
             warn!(error = %e, block_number = latest_block_number,
                 "Failed to send BlocksReorged event");
@@ -451,16 +442,27 @@ impl EvmBlockchainWorker {
         &mut self,
         block_number: u64
     ) {
-        if let Some(txs) = self.tracked_txs.remove(&block_number) {
-            for tx in txs {
-                if let Err(e) = self.event_tx.send(ChainEvent::PaymentConfirmed {
-                    tx_hash: tx.tx_hash,
-                    block_number: tx.block_number,
-                    block_hash: tx.block_hash,
-                    confirmed_after: block_number - tx.block_number,
-                }).await {
-                    warn!(error = %e, current_block_number = block_number,
-                        "Failed to send PaymentConfirmed event");
+        let ready_keys: Vec<u64> = self.tracked_txs.keys()
+            .filter(|&k| *k <= block_number)
+            .copied()
+            .collect();
+
+        for k in ready_keys {
+            if let Some(txs) = self.tracked_txs.remove(&k) {
+                for tx in txs {
+                    if let Ok(tx_hash) = tx.tx_hash.parse::<TxHash>() {
+                        self.tx_block_map.remove(&tx_hash);
+                    }
+
+                    if let Err(e) = self.event_tx.send(ChainEvent::PaymentConfirmed {
+                        tx_hash: tx.tx_hash.clone(),
+                        block_number: tx.block_number,
+                        block_hash: tx.block_hash,
+                        confirmed_after: block_number - tx.block_number,
+                    }).await {
+                        warn!(error = %e, tx_hash = tx.tx_hash, current_block_number = block_number,
+                            "Failed to send PaymentConfirmed event");
+                    }
                 }
             }
         }
@@ -498,13 +500,13 @@ impl EvmBlockchainWorker {
     async fn process_block(
         &self,
         block_number: u64
-    ) -> anyhow::Result<(BlockHash, BlockHash)> {
+    ) -> anyhow::Result<(BlockHash, String)> {
         let state = self.state_rx.borrow().clone();
 
         let block = self.get_block(block_number).await;
 
         let block_hash = block.header.hash;
-        let parent_hash = block.header.parent_hash;
+        let parent_hash = block.header.parent_hash.to_string();
 
         for tx in block.into_transactions_iter() {
             let address_to = if let Some(addr) = tx.to() {
@@ -534,6 +536,7 @@ impl EvmBlockchainWorker {
                 );
 
                 let event = ChainEvent::PaymentDetected {
+                    chain_name: state.static_data.name.clone(),
                     tx_hash,
                     from,
                     to: address_to.to_string(),
@@ -541,7 +544,7 @@ impl EvmBlockchainWorker {
                     amount_raw: amount,
                     amount_human,
                     block_number,
-                    block_hash,
+                    block_hash: block_hash.to_string(),
                     log_index: None,
                     required_confirmations: state.dynamic_data.required_confirmations,
                 };
@@ -568,9 +571,21 @@ impl EvmBlockchainWorker {
             return Ok(());
         }
 
-        let filter = Filter::new()
-            .at_block_hash(block_hash)
-            .event_signature(Transfer::SIGNATURE_HASH);
+        let filter = match self.tokens_map.len() < 15 {
+            true => {
+                let token_addresses: Vec<Address> = self.tokens_map.keys()
+                    .copied()
+                    .collect();
+
+                Filter::new()
+                    .at_block_hash(block_hash)
+                    .address(token_addresses)
+                    .event_signature(Transfer::SIGNATURE_HASH)
+            }
+            false => Filter::new()
+                .at_block_hash(block_hash)
+                .event_signature(Transfer::SIGNATURE_HASH)
+        };
 
         let mut attempt = 0;
         let max_retries = 3;
@@ -595,9 +610,7 @@ impl EvmBlockchainWorker {
                         continue;
                     }
 
-                    if attempt >= max_retries {
-                        debug!("Gave up retrying. Assuming transaction reverted or emitted no events.");
-                    }
+                    debug!("Gave up retrying.");
 
                     break l;
                 },
@@ -652,6 +665,7 @@ impl EvmBlockchainWorker {
                 );
 
                 let event = ChainEvent::PaymentDetected {
+                    chain_name: state.static_data.name.clone(),
                     tx_hash,
                     from,
                     to: address_to.to_string(),
@@ -659,7 +673,7 @@ impl EvmBlockchainWorker {
                     amount_raw: amount,
                     amount_human,
                     block_number,
-                    block_hash,
+                    block_hash: block_hash.to_string(),
                     log_index: log.log_index,
                     required_confirmations: state.dynamic_data.required_confirmations,
                 };

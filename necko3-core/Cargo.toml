@@ -1,6 +1,16 @@
 [package]
 name = "necko3-core"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2024"
 
 [dependencies]
+tokio = { version = "1", features = ["sync"] }
+tracing = "0.1"
+
+alloy-primitives = { version = "1.6", features = ["serde"] }
+uuid = { version = "1.23", features = ["v4", "serde"] }
+dashmap = "6.2"
+
+necko3-types = { path = "../necko3-types" }
+necko3-blockchain = { path = "../necko3-blockchain" }
+necko3-database = { path = "../necko3-database" }

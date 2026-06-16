@@ -5,6 +5,7 @@ pub use crate::traits::payment::PaymentStore;
 pub use crate::traits::token::TokenStore;
 pub use crate::traits::webhook::WebhookStore;
 pub use crate::traits::xpub::XPubStore;
+pub use crate::traits::indexed_blocks::IndexedBlocksStore;
 
 pub use async_trait::async_trait;
 
@@ -15,6 +16,7 @@ pub mod ext;
 pub mod payment;
 pub mod webhook;
 pub mod xpub;
+pub mod indexed_blocks;
 
 #[async_trait]
 pub trait DatabaseAdapter: Send + Sync {
@@ -27,10 +29,11 @@ pub trait DatabaseStore:
     InvoiceStore +
     PaymentStore +
     WebhookStore +
-    XPubStore
+    XPubStore +
+    IndexedBlocksStore
 {}
 
 impl<T> DatabaseStore for T
 where
-    T: ChainStore + TokenStore + InvoiceStore + PaymentStore + WebhookStore + XPubStore
+    T: ChainStore + TokenStore + InvoiceStore + PaymentStore + WebhookStore + XPubStore + IndexedBlocksStore
 {}

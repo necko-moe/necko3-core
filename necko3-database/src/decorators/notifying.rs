@@ -1,10 +1,12 @@
+use std::collections::HashMap;
 use crate::model::{ChainData, ExpiredInvoiceInfo, FinalizedPaymentInfo, Invoice, InvoiceFilter, InvoiceStatus, PaginatedVec, PartialChainUpdate, Payment, PaymentFilter, PaymentStatus, TokenData, Webhook, WebhookFilter, WebhookJob, WebhookStatus};
-use crate::traits::{ChainStore, DatabaseExt, InvoiceStore, PaymentStore, TokenStore, WebhookStore, XPubStore};
-use alloy_primitives::U256;
+use crate::traits::{ChainStore, DatabaseExt, IndexedBlocksStore, InvoiceStore, PaymentStore, TokenStore, WebhookStore, XPubStore};
+use alloy_primitives::{BlockNumber, U256};
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use tokio::sync::mpsc;
 use uuid::Uuid;
+use necko3_types::UpsertPayment;
 
 pub struct NotifyingDb<D> {
     inner: D,
@@ -18,8 +20,10 @@ pub enum DbEvent {
     ChainActiveUpdated { chain_name: String, active: bool },
     ChainBlockUpdated { chain_name: String, block_number: u64 },
     ChainWatchAddressAdded { chain_name: String, address: String },
-    ChainWatchAddressRemoved { chain_name: String, addresses: Vec<String> },
+    ChainWatchAddressesRemoved { chain_name: String, addresses: Vec<String> },
 
+    IndexedBlocksUpserted { chain_id: i32, blocks: Vec<(BlockNumber, String)> },
+    
     TokenAdded { token_data: TokenData },
     TokenRemoved { token_data: TokenData },
 
@@ -29,7 +33,7 @@ pub enum DbEvent {
     InvoicePaymentApplied { invoice_id: Uuid, paid_raw_before: U256, paid_raw_after: U256,
         old_status: InvoiceStatus, new_status: InvoiceStatus },
 
-    PaymentUpserted { payment: Payment, is_new_payment: bool },
+    PaymentUpserted { payment_id: Uuid, payment: UpsertPayment, is_new_payment: bool },
     PaymentStatusUpdated { payment_id: Uuid, new_status: PaymentStatus },
     PaymentBlockUpdated { payment_id: Uuid, block_number: u64 },
 
@@ -141,7 +145,7 @@ impl<D: DatabaseExt> ChainStore for NotifyingDb<D> {
     async fn remove_watch_address(&self, chain_name: &str, address: &str) -> anyhow::Result<bool> {
         let removed = self.inner.remove_watch_address(chain_name, address).await?;
 
-        let _ = self.tx.send(DbEvent::ChainWatchAddressRemoved {
+        let _ = self.tx.send(DbEvent::ChainWatchAddressesRemoved {
             chain_name: chain_name.to_string(),
             addresses: vec![address.to_string()],
         }).await;
@@ -152,7 +156,7 @@ impl<D: DatabaseExt> ChainStore for NotifyingDb<D> {
     async fn remove_watch_addresses(&self, chain_name: &str, addresses: &[String]) -> anyhow::Result<Vec<String>> {
         let removed = self.inner.remove_watch_addresses(chain_name, addresses).await?;
 
-        let _ = self.tx.send(DbEvent::ChainWatchAddressRemoved {
+        let _ = self.tx.send(DbEvent::ChainWatchAddressesRemoved {
             chain_name: chain_name.to_string(),
             addresses: removed.clone(),
         }).await;
@@ -289,15 +293,16 @@ impl<D: DatabaseExt> PaymentStore for NotifyingDb<D> {
         self.inner.get_confirming_payments().await
     }
 
-    async fn upsert_payment(&self, payment: &Payment) -> anyhow::Result<bool> {
-        let inserted = self.inner.upsert_payment(payment).await?;
+    async fn upsert_payment(&self, payment: &UpsertPayment) -> anyhow::Result<(Uuid, bool)> {
+        let (id, inserted) = self.inner.upsert_payment(payment).await?;
 
         let _ = self.tx.send(DbEvent::PaymentUpserted {
+            payment_id: id,
             payment: payment.clone(),
             is_new_payment: inserted,
         }).await;
 
-        Ok(inserted)
+        Ok((id, inserted))
     }
 
     async fn update_payment_status(&self, payment_id: Uuid, status: PaymentStatus) -> anyhow::Result<()> {
@@ -384,6 +389,35 @@ impl<D: DatabaseExt> WebhookStore for NotifyingDb<D> {
 impl<D: DatabaseExt> XPubStore for NotifyingDb<D> {
     async fn next_derivation_index(&self, xpub: &str) -> anyhow::Result<u64> {
         self.inner.next_derivation_index(xpub).await
+    }
+}
+
+#[async_trait]
+impl<D: DatabaseExt> IndexedBlocksStore for NotifyingDb<D> {
+    async fn get_latest_indexed_blocks(&self, chain_id: i32, limit: u16) -> anyhow::Result<HashMap<BlockNumber, String>> {
+        self.inner.get_latest_indexed_blocks(chain_id, limit).await
+    }
+
+    async fn upsert_indexed_block(&self, chain_id: i32, block_number: u64, block_hash: String) -> anyhow::Result<()> {
+        self.inner.upsert_indexed_block(chain_id, block_number, block_hash.clone()).await?;
+
+        let _ = self.tx.send(DbEvent::IndexedBlocksUpserted {
+            chain_id,
+            blocks: vec![(block_number, block_hash)],
+        }).await;
+
+        Ok(())
+    }
+
+    async fn upsert_indexed_blocks_batch(&self, chain_id: i32, blocks: &[(BlockNumber, String)]) -> anyhow::Result<()> {
+        self.inner.upsert_indexed_blocks_batch(chain_id, blocks).await?;
+
+        let _ = self.tx.send(DbEvent::IndexedBlocksUpserted {
+            chain_id,
+            blocks: blocks.to_vec(),
+        }).await;
+
+        Ok(())
     }
 }
 

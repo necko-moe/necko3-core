@@ -1,9 +1,9 @@
 pub mod blockchain;
 
-use std::collections::HashSet;
-use alloy_primitives::{BlockHash, U256};
+use alloy_primitives::U256;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use std::collections::HashSet;
 use strum::{AsRefStr, Display, EnumString};
 use uuid::Uuid;
 
@@ -79,10 +79,42 @@ pub struct Payment {
     pub tx_hash: String,
     pub amount_raw: U256,
     pub block_number: u64,
-    pub block_hash: BlockHash,
-    pub log_index: u64,
+    pub block_hash: String,
+    pub log_index: Option<u64>,
     pub status: PaymentStatus,
     pub created_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UpsertPayment {
+    pub from: String,
+    pub to: String,
+    pub network: String,
+    pub token: String,
+    pub tx_hash: String,
+    pub amount_raw: U256,
+    pub block_number: u64,
+    pub block_hash: String,
+    pub log_index: Option<u64>,
+}
+
+impl From<UpsertPayment> for Payment {
+    fn from(value: UpsertPayment) -> Self {
+        Self {
+            id: Uuid::new_v4(),
+            from: value.from,
+            to: value.to,
+            network: value.network,
+            token: value.token,
+            tx_hash: value.tx_hash,
+            amount_raw: value.amount_raw,
+            block_number: value.block_number,
+            block_hash: value.block_hash,
+            log_index: value.log_index,
+            status: PaymentStatus::Confirming,
+            created_at: Utc::now(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq,

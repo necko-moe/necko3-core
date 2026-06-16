@@ -1,18 +1,16 @@
-use alloy::primitives::{BlockHash, BlockNumber};
-use async_trait::async_trait;
-use tokio::sync::{mpsc, watch};
-use necko3_types::blockchain::{ChainEvent, ChainState, TrackTransaction};
 use crate::traits::worker::BlockchainWorker;
+use alloy::primitives::BlockNumber;
+use async_trait::async_trait;
+use necko3_types::blockchain::{ChainEvent, ChainState, TrackTransaction};
+use std::collections::HashMap;
+use tokio::sync::{mpsc, watch};
 
 #[async_trait]
 pub trait BlockchainAdapter: Send + Sync {
-    fn with_rpc_urls(rpc_urls: Vec<String>) -> anyhow::Result<Self> where Self: Sized;
-    fn with_rpc_url(rpc_url: String) -> anyhow::Result<Self> where Self: Sized;
-
     fn derive_address(xpub: String, index: u32) -> anyhow::Result<String>;
-    async fn get_tx_block_number(&self, tx_hash: &str) -> anyhow::Result<Option<(BlockNumber, BlockHash)>>;
 
     fn build_worker(
+        block_hashes: HashMap<BlockNumber, String>,
         state_rx: watch::Receiver<ChainState>,
         transactions_rs: mpsc::Receiver<TrackTransaction>,
         event_tx: mpsc::Sender<ChainEvent>

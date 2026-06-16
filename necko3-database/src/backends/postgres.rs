@@ -1,8 +1,8 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use crate::model::{ChainData, ChainType, ExpiredInvoiceInfo, FinalizedPaymentInfo, Invoice, InvoiceFilter, InvoiceStatus, PaginatedVec, PartialChainUpdate, Payment, PaymentFilter, PaymentStatus, TokenData, Webhook, WebhookEvent, WebhookFilter, WebhookJob, WebhookStatus};
 use crate::traits::*;
 use alloy_primitives::utils::format_units;
-use alloy_primitives::{B256, U256};
+use alloy_primitives::{BlockNumber, U256};
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use serde_json::Value;
@@ -11,6 +11,7 @@ use sqlx::types::BigDecimal;
 use sqlx::{PgPool, QueryBuilder, Row};
 use std::str::FromStr;
 use uuid::Uuid;
+use necko3_types::UpsertPayment;
 
 pub struct PostgresAdapter {
     pool: PgPool
@@ -136,10 +137,6 @@ impl PostgresAdapter {
         let amount_raw = U256::from_str(&amount_str)
             .map_err(|e| anyhow::anyhow!("Failed to parse amount_raw: {}", e))?;
 
-        let block_hash_str: String = row.get("block_hash");
-        let block_hash = B256::from_str(&block_hash_str)
-            .map_err(|e| anyhow::anyhow!("Failed to parse block_hash: {}", e))?;
-
         Ok(Payment {
             id: row.get::<Uuid, _>("id"),
             from: row.get("from"),
@@ -149,10 +146,10 @@ impl PostgresAdapter {
             tx_hash: row.get("tx_hash"),
             amount_raw,
             block_number: row.get::<i64, _>("block_number") as u64,
-            block_hash,
+            block_hash: row.get("block_hash"),
             status,
             created_at: row.get("created_at"),
-            log_index: row.get::<i64, _>("log_index") as u64,
+            log_index: row.get::<Option<i64>, _>("log_index").map(|x| x as u64),
         })
     }
 
@@ -812,16 +809,16 @@ impl PaymentStore for PostgresAdapter {
         rows.into_iter().map(Self::map_row_to_payment).collect()
     }
 
-    async fn upsert_payment(&self, payment: &Payment) -> anyhow::Result<bool> {
+    async fn upsert_payment(&self, payment: &UpsertPayment) -> anyhow::Result<(Uuid, bool)> {
         let amount_bd = BigDecimal::from_str(&payment.amount_raw.to_string())?;
 
         let row = sqlx::query(
             r#"INSERT INTO payments ("from", "to", network, tx_hash, amount_raw,
                       block_number, block_hash, status, log_index, token)
-                   VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+                   VALUES ($1, $2, $3, $4, $5, $6, $7, 'Confirming', $9, $10)
                    ON CONFLICT (tx_hash, log_index, network)
                    DO UPDATE SET block_number = excluded.block_number
-                   RETURNING (xmax = 0) AS inserted"#
+                   RETURNING id, (xmax = 0) AS inserted"#
         )
             .bind(&payment.from)
             .bind(&payment.to)
@@ -830,14 +827,15 @@ impl PaymentStore for PostgresAdapter {
             .bind(amount_bd)
             .bind(payment.block_number as i64)
             .bind(payment.block_hash.to_string())
-            .bind(payment.status.to_string())
-            .bind(payment.log_index as i64)
+            .bind(payment.log_index.map(|index| index as i64))
             .bind(&payment.token)
             .fetch_one(&self.pool)
             .await?;
-        
+
+        let id: Uuid = row.get("id");
         let inserted: bool = row.get("inserted");
-        Ok(inserted)
+
+        Ok((id, inserted))
     }
 
     async fn update_payment_status(&self, payment_id: Uuid, status: PaymentStatus) -> anyhow::Result<()> {
@@ -1028,6 +1026,71 @@ impl XPubStore for PostgresAdapter {
             .await?;
 
         Ok(index as u64)
+    }
+}
+
+#[async_trait]
+impl IndexedBlocksStore for PostgresAdapter {
+    async fn get_latest_indexed_blocks(&self, chain_id: i32, limit: u16) -> anyhow::Result<HashMap<BlockNumber, String>> {
+        let blocks_db = sqlx::query_as::<_, (i64, String)>(
+            r#"SELECT block_number, block_hash
+                   FROM indexed_blocks
+                   WHERE chain_id = $1
+                   ORDER BY block_number DESC
+                   LIMIT $2"#
+        )
+            .bind(chain_id)
+            .bind(limit as i16)
+            .fetch_all(&self.pool)
+            .await?;
+
+        let blocks = blocks_db
+            .into_iter()
+            .map(|(block_number, block_hash)| (block_number as u64, block_hash))
+            .collect::<HashMap<BlockNumber, String>>();
+
+        Ok(blocks)
+    }
+
+    async fn upsert_indexed_block(&self, chain_id: i32, block_number: u64, block_hash: String) -> anyhow::Result<()> {
+        sqlx::query(
+            r#"INSERT INTO indexed_blocks (chain_id, block_number, block_hash)
+                   VALUES ($1, $2, $3)
+                   ON CONFLICT (chain_id, block_number)
+                       DO UPDATE SET block_hash = EXCLUDED.block_hash"#
+        )
+            .bind(chain_id)
+            .bind(block_number as i64)
+            .bind(block_hash)
+            .execute(&self.pool)
+            .await?;
+
+        Ok(())
+    }
+
+    async fn upsert_indexed_blocks_batch(&self, chain_id: i32, blocks: &[(BlockNumber, String)]) -> anyhow::Result<()> {
+        if blocks.is_empty() {
+            return Ok(());
+        }
+
+        let mut query_builder = QueryBuilder::new(
+            "INSERT INTO indexed_blocks (chain_id, block_number, block_hash) "
+        );
+
+        query_builder.push_values(blocks, |mut binder, (block_number, block_hash)| {
+            binder.push_bind(chain_id)
+                .push_bind(*block_number as i64)
+                .push_bind(block_hash);
+        });
+
+        query_builder.push(
+            " ON CONFLICT (chain_id, block_number) DO UPDATE SET block_hash = EXCLUDED.block_hash"
+        );
+
+        let query = query_builder.build();
+        query.execute(&self.pool).await?;
+
+        Ok(())
     }
 }
 

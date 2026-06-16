@@ -1,7 +1,7 @@
 use crate::model::{ChainData, ExpiredInvoiceInfo, Invoice, InvoiceFilter, InvoiceStatus, PaginatedVec, PartialChainUpdate, Payment, PaymentFilter, PaymentStatus, TokenData, Webhook, WebhookFilter, WebhookJob, WebhookStatus};
-use crate::traits::{ChainStore, DatabaseAdapter, DatabaseExt, InvoiceStore, PaymentStore, TokenStore, WebhookStore, XPubStore};
+use crate::traits::{ChainStore, DatabaseAdapter, DatabaseExt, IndexedBlocksStore, InvoiceStore, PaymentStore, TokenStore, WebhookStore, XPubStore};
 use alloy_primitives::utils::format_units;
-use alloy_primitives::U256;
+use alloy_primitives::{BlockNumber, U256};
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use dashmap::DashMap;
@@ -9,10 +9,12 @@ use parking_lot::RwLock;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use uuid::Uuid;
+use necko3_types::UpsertPayment;
 
 #[derive(Default)]
-pub struct MockDatabase {
+pub struct InMemoryAdapter {
     chains: RwLock<HashMap<String, ChainData>>,
+    indexed_blocks: DashMap<(i32, BlockNumber), String>,
     tokens: RwLock<HashMap<String, HashMap<String, TokenData>>>,
 
     invoices: DashMap<Uuid, Invoice>,
@@ -23,7 +25,7 @@ pub struct MockDatabase {
 }
 
 #[async_trait]
-impl DatabaseAdapter for MockDatabase {
+impl DatabaseAdapter for InMemoryAdapter {
     async fn new(_database_url: &str, _max_connections: u32) -> anyhow::Result<Self>
     where
         Self: Sized
@@ -33,7 +35,7 @@ impl DatabaseAdapter for MockDatabase {
 }
 
 #[async_trait]
-impl ChainStore for MockDatabase {
+impl ChainStore for InMemoryAdapter {
     async fn get_chains(&self) -> anyhow::Result<Vec<ChainData>> {
         Ok(self.chains.read().values().cloned().collect())
     }
@@ -134,7 +136,7 @@ impl ChainStore for MockDatabase {
 }
 
 #[async_trait]
-impl TokenStore for MockDatabase {
+impl TokenStore for InMemoryAdapter {
     async fn get_tokens(&self, chain_name: &str) -> anyhow::Result<Vec<TokenData>> {
         Ok(self.tokens.read().get(chain_name)
             .map(|c| c.values().cloned().collect())
@@ -182,8 +184,8 @@ impl TokenStore for MockDatabase {
 
     async fn add_token(&self, chain_name: &str, token_config: &TokenData) -> anyhow::Result<()> {
         self.tokens.write()
-            .get_mut(chain_name)
-            .ok_or_else(|| anyhow::anyhow!("Chain {} not found in DB", chain_name))?
+            .entry(chain_name.to_string())
+            .or_default()
             .insert(token_config.symbol.clone(), token_config.clone());
 
         Ok(())
@@ -208,7 +210,7 @@ impl TokenStore for MockDatabase {
 }
 
 #[async_trait]
-impl InvoiceStore for MockDatabase {
+impl InvoiceStore for InMemoryAdapter {
     async fn get_invoices(&self, filter: InvoiceFilter) -> anyhow::Result<PaginatedVec<Invoice>> {
         let mut filtered: Vec<Invoice> = self.invoices.iter()
             .filter(|kv| {
@@ -317,7 +319,7 @@ impl InvoiceStore for MockDatabase {
 }
 
 #[async_trait]
-impl PaymentStore for MockDatabase {
+impl PaymentStore for InMemoryAdapter {
     async fn get_payments(&self, filter: PaymentFilter) -> anyhow::Result<PaginatedVec<Payment>> {
         let mut filtered: Vec<Payment> = self.payments.iter()
             .filter(|kv| {
@@ -365,16 +367,27 @@ impl PaymentStore for MockDatabase {
             .collect())
     }
 
-    async fn upsert_payment(&self, payment: &Payment) -> anyhow::Result<bool> {
-        if let Some(mut existing) = self.payments.get_mut(&payment.id) {
-            existing.block_number = payment.block_number;
-            existing.block_hash = payment.block_hash;
-            return Ok(false)
+    async fn upsert_payment(&self, upsert: &UpsertPayment) -> anyhow::Result<(Uuid, bool)> {
+        if let Some(mut existing) = self.payments.iter_mut()
+            .find(|x| {
+                let pay = x.value();
+
+                pay.tx_hash == upsert.tx_hash
+                    && pay.log_index == upsert.log_index
+                    && pay.network == upsert.network
+            })
+        {
+            existing.block_number = upsert.block_number;
+            existing.block_hash = upsert.block_hash.clone();
+
+            return Ok((existing.id, false));
         }
 
-        self.payments.insert(payment.id.clone(), payment.clone());
+        let new_payment: Payment = upsert.clone().into();
+        let payment_id = new_payment.id;
+        self.payments.insert(new_payment.id, new_payment);
 
-        Ok(true)
+        Ok((payment_id, true))
     }
 
     async fn update_payment_status(&self, payment_id: Uuid, status: PaymentStatus) -> anyhow::Result<()> {
@@ -399,7 +412,7 @@ impl PaymentStore for MockDatabase {
 }
 
 #[async_trait]
-impl WebhookStore for MockDatabase {
+impl WebhookStore for InMemoryAdapter {
     async fn get_webhooks(&self, filter: WebhookFilter) -> anyhow::Result<PaginatedVec<Webhook>> {
         let mut filtered: Vec<Webhook> = self.webhooks.iter()
             .filter(|x| {
@@ -500,7 +513,7 @@ impl WebhookStore for MockDatabase {
 }
 
 #[async_trait]
-impl XPubStore for MockDatabase {
+impl XPubStore for InMemoryAdapter {
     async fn next_derivation_index(&self, xpub: &str) -> anyhow::Result<u64> {
         if let Some(last_used_index) = self.xpub_states.get(xpub) {
             return Ok(last_used_index.value()
@@ -516,4 +529,36 @@ impl XPubStore for MockDatabase {
 }
 
 #[async_trait]
-impl DatabaseExt for MockDatabase {}
+impl IndexedBlocksStore for InMemoryAdapter {
+    async fn get_latest_indexed_blocks(&self, chain_id: i32, limit: u16) -> anyhow::Result<HashMap<BlockNumber, String>> {
+        let mut blocks = self.indexed_blocks.iter()
+            .filter(|block| block.key().0 == chain_id)
+            .map(|block| (block.key().1, block.value().clone()))
+            .collect::<Vec<_>>();
+
+        blocks.sort_unstable_by(|a, b| b.0.cmp(&a.0));
+
+        let result = blocks
+            .into_iter()
+            .take(limit as usize)
+            .collect::<HashMap<BlockNumber, String>>();
+
+        Ok(result)
+    }
+
+    async fn upsert_indexed_block(&self, chain_id: i32, block_number: u64, block_hash: String) -> anyhow::Result<()> {
+        self.indexed_blocks.insert((chain_id, block_number), block_hash);
+        Ok(())
+    }
+
+    async fn upsert_indexed_blocks_batch(&self, chain_id: i32, blocks: &[(BlockNumber, String)]) -> anyhow::Result<()> {
+        for (block_number, block_hash) in blocks {
+            self.indexed_blocks.insert((chain_id, *block_number), block_hash.clone());
+        }
+
+        Ok(())
+    }
+}
+
+#[async_trait]
+impl DatabaseExt for InMemoryAdapter {}
