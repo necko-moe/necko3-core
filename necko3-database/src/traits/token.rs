@@ -1,4 +1,4 @@
-use crate::model::TokenData;
+use necko3_types::TokenData;
 use async_trait::async_trait;
 
 #[async_trait]

@@ -1,7 +1,8 @@
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use uuid::Uuid;
-use crate::model::{PaginatedVec, Webhook, WebhookFilter, WebhookJob, WebhookStatus};
+use necko3_types::{Webhook, WebhookStatus};
+use crate::model::{PaginatedVec, WebhookFilter, WebhookJob};
 
 #[async_trait]
 pub trait WebhookStore: Sync + Send {

@@ -1517,7 +1517,7 @@ dependencies = [
 
 [[package]]
 name = "necko3-database"
-version = "0.1.7"
+version = "0.1.8"
 dependencies = [
  "alloy-primitives",
  "anyhow",
@@ -1537,7 +1537,7 @@ dependencies = [
 
 [[package]]
 name = "necko3-types"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "alloy-primitives",
  "chrono",

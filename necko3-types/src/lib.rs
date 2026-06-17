@@ -6,6 +6,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use strum::{AsRefStr, Display, EnumString};
 use uuid::Uuid;
+use crate::blockchain::Asset;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ChainData {
@@ -90,12 +91,14 @@ pub struct UpsertPayment {
     pub from: String,
     pub to: String,
     pub network: String,
-    pub token: String,
+    pub asset: Asset,
     pub tx_hash: String,
     pub amount_raw: U256,
+    pub amount_human: String,
     pub block_number: u64,
     pub block_hash: String,
     pub log_index: Option<u64>,
+    pub required_confirmations: u64,
 }
 
 impl From<UpsertPayment> for Payment {
@@ -105,7 +108,7 @@ impl From<UpsertPayment> for Payment {
             from: value.from,
             to: value.to,
             network: value.network,
-            token: value.token,
+            token: value.asset.to_symbol(),
             tx_hash: value.tx_hash,
             amount_raw: value.amount_raw,
             block_number: value.block_number,
@@ -124,6 +127,91 @@ pub enum PaymentStatus {
     Pending,
     Confirming,
     Confirmed,
+    Failed,
+    Cancelled,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq,
+    Display, EnumString, AsRefStr)]
+#[strum(serialize_all = "PascalCase")]
+pub enum InvoiceStatus {
+    Pending,
+    Paid,
+    Expired,
+    Cancelled,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct Invoice {
+    pub id: Uuid,
+    pub address_index: u32,
+    pub address: String,
+    pub amount: String,
+    pub amount_raw: U256,
+    pub paid: String,
+    pub paid_raw: U256,
+    pub token: String,
+    pub network: String,
+    pub decimals: u8,
+    pub webhook_url: Option<String>,
+    pub webhook_secret: Option<String>,
+    pub webhook_max_retries: Option<u32>,
+    pub created_at: DateTime<Utc>,
+    pub expires_at: DateTime<Utc>,
+    pub status: InvoiceStatus,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct Webhook {
+    pub id: Uuid,
+    pub invoice_id: Uuid,
+    pub url: String,
+    pub payload: WebhookEvent,
+    pub status: WebhookStatus,
+    pub attempts: u32,
+    pub max_retries: u32,
+    pub next_retry: DateTime<Utc>,
+    pub created_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq,
+    Display, EnumString, AsRefStr)]
+#[serde(tag = "event_type", content = "data", rename_all = "snake_case")]
+#[strum(serialize_all = "snake_case")]
+pub enum WebhookEvent {
+    TxDetected {
+        invoice_id: Uuid,
+        tx_hash: String,
+        amount: String,
+        currency: String,
+    },
+    TxConfirmed {
+        invoice_id: Uuid,
+        tx_hash: String,
+        confirmations: u64,
+    },
+    PaymentCancelled {
+        payment_id: Uuid,
+    },
+    InvoicePaid {
+        invoice_id: Uuid,
+        paid_amount: String,
+    },
+    InvoiceExpired {
+        invoice_id: Uuid,
+    },
+    InvoiceCancelled {
+        invoice_id: Uuid,
+    }
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq,
+    Display, EnumString, AsRefStr)]
+#[strum(serialize_all = "PascalCase")]
+pub enum WebhookStatus {
+    Pending,
+    Processing,
+    Sent,
     Failed,
     Cancelled,
 }

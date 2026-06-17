@@ -90,6 +90,7 @@ pub struct EvmBlockchainWorker {
     provider: DynProvider<AnyNetwork>,
     state: ChainState,
     state_rx: mpsc::Receiver<StateCommand>,
+    latest_block_num: u64,
 
     transactions_rx: mpsc::Receiver<TrackTransaction>,
     /// key = block_number+required_confirmations
@@ -127,6 +128,7 @@ impl EvmBlockchainWorker {
             provider,
             state,
             state_rx,
+            latest_block_num: 0,
             transactions_rx,
             tracked_txs: HashMap::new(),
             watch_addresses,
@@ -145,21 +147,7 @@ impl BlockchainWorker for EvmBlockchainWorker {
         let worker_span = tracing::info_span!("worker", chain_name = self.state.static_data.name);
 
         async {
-            // starting point
-            let mut latest_block_num = self.state.static_data.starting_block_num;
-            if latest_block_num == 0 {
-                latest_block_num = loop {
-                    match self.provider.get_block_number().await {
-                        Ok(n) => break n,
-                        Err(e) => {
-                            warn!(error = %e, "Failed to get latest block number, retrying in 2s...");
-                            tokio::time::sleep(Duration::from_secs(2)).await;
-                        }
-                    };
-                }
-            }
-
-            info!(latest_block = latest_block_num, "Starting worker from the latest block");
+            self.init_starting_block().await;
 
             let mut interval = time::interval(Duration::from_millis(1500));
             interval.set_missed_tick_behavior(MissedTickBehavior::Delay);
@@ -171,183 +159,217 @@ impl BlockchainWorker for EvmBlockchainWorker {
                     biased;
 
                     cmd_opt = self.state_rx.recv() => {
-                        let cmd = if let Some(c) = cmd_opt { c }
+                        let Some(cmd) = cmd_opt
                         else {
                             warn!("State change channel closed. Exiting worker loop.");
                             break
                         };
 
-                        match cmd {
-                            StateCommand::AddWatchAddress(addr) => {
-                                match addr.parse::<Address>() {
-                                    Ok(addr) => {
-                                        self.watch_addresses.insert(addr);
-                                    }
-                                    Err(e) => {
-                                        warn!(watch_address = addr, error = %e,
-                                            "Failed to parse token watch_address as Address");
-                                    }
-                                }
-                            }
-                            StateCommand::RemoveWatchAddress(addr) => {
-                                match addr.parse::<Address>() {
-                                    Ok(addr) => {
-                                        self.watch_addresses.remove(&addr);
-                                    }
-                                    Err(e) => {
-                                        warn!(watch_address = addr, error = %e,
-                                            "Failed to parse token watch_address as Address");
-                                    }
-                                }
-                            }
-                            StateCommand::AddTokenData(token_data) => {
-                                let contract_address = token_data.contract.as_str();
-
-                                match contract_address.parse::<Address>() {
-                                    Ok(addr) => {
-                                        self.tokens_map.insert(addr, token_data);
-                                    }
-                                    Err(e) => {
-                                        warn!(contract_address, error = %e,
-                                            "Failed to parse token contract_address as Address");
-                                    }
-                                }
-                            }
-                            StateCommand::RemoveToken { contract_address } => {
-                                match contract_address.parse::<Address>() {
-                                    Ok(addr) => {
-                                        self.tokens_map.remove(&addr);
-                                    }
-                                    Err(e) => {
-                                        warn!(contract_address, error = %e,
-                                            "Failed to parse token contract_address as Address");
-                                    }
-                                }
-                            }
-                            StateCommand::ChangeActive(is_active) => {
-                                self.state.dynamic_data.active = is_active;
-                            }
-                            StateCommand::ChangeRpcUrls(rpc_urls) => {
-                                match create_fallback_provider(&rpc_urls) {
-                                    Ok(provider) => {
-                                        self.provider = provider;
-                                        debug!("Provider successfully updated with new RPC URLs");
-                                    }
-                                    Err(e) => {
-                                        warn!(error = %e, "Failed to create fallback provider. Error: {:?}", e)
-                                    }
-                                }
-                            }
-                            StateCommand::ChangeLastProcessedBlock(last_processed_block) => {
-                                latest_block_num = last_processed_block;
-                            }
-                            StateCommand::ChangeBlockLag(block_lag) => {
-                                self.state.dynamic_data.block_lag = block_lag;
-                            }
-                            StateCommand::ChangeSafeLag(safe_lag) => {
-                                self.state.dynamic_data.safe_lag = safe_lag;
-                            }
-                            StateCommand::ChangeRequiredConfirmations(req_confirm) => {
-                                self.state.dynamic_data.required_confirmations = req_confirm;
-                            }
-                        };
+                        self.handle_state_command(cmd);
                     }
 
                     track_request_opt = self.transactions_rx.recv() => {
-                        let track = if let Some(r) = track_request_opt { r }
+                        let Some(track) = track_request_opt
                         else {
                             warn!("Tracking transactions channel closed. Exiting worker loop.");
                             break
                         };
 
-                        let tracked_key = track.block_number + track.confirm_after;
-                        let tracked_tx = TrackedTx {
-                            tx_hash: track.tx_hash.clone(),
-                            block_hash: track.block_hash,
-                            block_number: track.block_number,
-                        };
-
-                        match track.tx_hash.parse::<TxHash>() {
-                            Ok(tx_hash) => self.tx_block_map
-                                .insert(tx_hash, (tracked_key, tracked_tx.clone())),
-                            Err(e) => {
-                                warn!(error = %e, "Failed to parse tx_hash. Skipping transaction.");
-                                continue
-                            }
-                        };
-
-                        self.tracked_txs.entry(tracked_key)
-                            .or_default()
-                            .insert(tracked_tx);
+                        self.handle_track_request(track);
                     }
 
                     _ = interval.tick() => {
-                        if !self.state.dynamic_data.active {
-                            trace!("Chain is not active. Skipping tick");
-                            continue
-                        }
-
-                        let current_block_num = match self.provider.get_block_number().await {
-                            Ok(n) => n,
-                            Err(e) => {
-                                warn!(error = %e, "Failed to get latest block number, retrying on next tick...");
-                                continue
-                            }
-                        };
-                        let block_with_lag = current_block_num
-                            .saturating_sub(self.state.dynamic_data.block_lag as u64);
-
-                        if block_with_lag <= latest_block_num {
-                            trace!(current = current_block_num, last = latest_block_num,
-                                "No new blocks, skipping tick...");
-                            continue
-                        }
-
-                        for block_num in (latest_block_num + 1)..=block_with_lag {
-                            let block_opt = match self.process_block(block_num).await
-                            {
-                                Ok(b) => Some(b),
-                                Err(e) => {
-                                    error!(error = %e, block_number = block_num,
-                                        "Failed to process block (very bad)");
-
-                                    None
-                                }
-                            };
-
-                            if let Some((block_hash, parent_hash)) = block_opt {
-                                self.block_hashes.insert(block_num, block_hash.to_string());
-
-                                self.process_blocks_reorg(block_num, parent_hash).await;
-                                self.process_tracked_transactions(block_num).await;
-
-                                let actual_lag = current_block_num - block_num;
-
-                                if let Err(e) = self.process_logs(block_hash, actual_lag).await {
-                                    error!(error = %e, block_number = block_num, block_hash = %block_hash,
-                                        "Failed to process logs for block");
-                                }
-
-                                if let Err(e) = self.event_tx.send(ChainEvent::BlockProcessed {
-                                    chain_id: self.state.static_data.id,
-                                    chain_name: self.state.static_data.name.clone(),
-                                    block_number: block_num,
-                                    block_hash: block_hash.to_string(),
-                                }).await {
-                                    warn!(error = %e, block_number = block_num,
-                                        "Failed to send BlockProcessed event");
-                                }
-                            } else {
-                                warn!(block_number = block_num,
-                                    "Skipping logs because process_block returned error instead of transactions");
-                            }
-
-                            latest_block_num = block_num;
-                        }
+                        self.handle_tick().await;
                     }
                 }
             }
         }.instrument(worker_span).await;
+    }
+}
+
+impl EvmBlockchainWorker {
+    async fn init_starting_block(&mut self) {
+        let mut latest_block_num = self.state.static_data.starting_block_num;
+
+        if latest_block_num == 0 {
+            latest_block_num = loop {
+                match self.provider.get_block_number().await {
+                    Ok(n) => break n,
+                    Err(e) => {
+                        warn!(error = %e, "Failed to get latest block number, retrying in 2s...");
+                        tokio::time::sleep(Duration::from_secs(2)).await;
+                    }
+                };
+            }
+        }
+
+        info!(latest_block = latest_block_num, "Starting worker from the latest block");
+
+        self.latest_block_num = latest_block_num;
+    }
+
+    fn handle_state_command(&mut self, cmd: StateCommand) {
+        match cmd {
+            StateCommand::AddWatchAddress(addr) => {
+                match addr.parse::<Address>() {
+                    Ok(addr) => {
+                        self.watch_addresses.insert(addr);
+                    }
+                    Err(e) => {
+                        warn!(watch_address = addr, error = %e,
+                                            "Failed to parse token watch_address as Address");
+                    }
+                }
+            }
+            StateCommand::RemoveWatchAddress(addr) => {
+                match addr.parse::<Address>() {
+                    Ok(addr) => {
+                        self.watch_addresses.remove(&addr);
+                    }
+                    Err(e) => {
+                        warn!(watch_address = addr, error = %e,
+                                            "Failed to parse token watch_address as Address");
+                    }
+                }
+            }
+            StateCommand::AddTokenData(token_data) => {
+                let contract_address = token_data.contract.as_str();
+
+                match contract_address.parse::<Address>() {
+                    Ok(addr) => {
+                        self.tokens_map.insert(addr, token_data);
+                    }
+                    Err(e) => {
+                        warn!(contract_address, error = %e,
+                                            "Failed to parse token contract_address as Address");
+                    }
+                }
+            }
+            StateCommand::RemoveToken { contract_address } => {
+                match contract_address.parse::<Address>() {
+                    Ok(addr) => {
+                        self.tokens_map.remove(&addr);
+                    }
+                    Err(e) => {
+                        warn!(contract_address, error = %e,
+                                            "Failed to parse token contract_address as Address");
+                    }
+                }
+            }
+            StateCommand::ChangeActive(is_active) => {
+                self.state.dynamic_data.active = is_active;
+            }
+            StateCommand::ChangeRpcUrls(rpc_urls) => {
+                match create_fallback_provider(&rpc_urls) {
+                    Ok(provider) => {
+                        self.provider = provider;
+                        debug!("Provider successfully updated with new RPC URLs");
+                    }
+                    Err(e) => {
+                        warn!(error = %e, "Failed to create fallback provider. Error: {:?}", e)
+                    }
+                }
+            }
+            StateCommand::ChangeLastProcessedBlock(last_processed_block) => {
+                self.latest_block_num = last_processed_block;
+            }
+            StateCommand::ChangeBlockLag(block_lag) => {
+                self.state.dynamic_data.block_lag = block_lag;
+            }
+            StateCommand::ChangeSafeLag(safe_lag) => {
+                self.state.dynamic_data.safe_lag = safe_lag;
+            }
+            StateCommand::ChangeRequiredConfirmations(req_confirm) => {
+                self.state.dynamic_data.required_confirmations = req_confirm;
+            }
+        };
+    }
+
+    fn handle_track_request(&mut self, track: TrackTransaction) {
+        let tracked_key = track.block_number + track.confirm_after;
+        let tracked_tx = TrackedTx {
+            tx_hash: track.tx_hash.clone(),
+            block_hash: track.block_hash,
+            block_number: track.block_number,
+        };
+
+        match track.tx_hash.parse::<TxHash>() {
+            Ok(tx_hash) => self.tx_block_map
+                .insert(tx_hash, (tracked_key, tracked_tx.clone())),
+            Err(e) => {
+                error!(error = %e, "Failed to parse tx_hash. Skipping transaction.");
+                return;
+            }
+        };
+
+        self.tracked_txs.entry(tracked_key)
+            .or_default()
+            .insert(tracked_tx);
+    }
+
+    async fn handle_tick(&mut self) {
+        if !self.state.dynamic_data.active {
+            trace!("Chain is not active. Skipping tick");
+            return;
+        }
+
+        let current_rpc_block_num = match self.provider.get_block_number().await {
+            Ok(n) => n,
+            Err(e) => {
+                warn!(error = %e, "Failed to get latest block number, retrying on next tick...");
+                return;
+            }
+        };
+        let rpc_block_with_lag = current_rpc_block_num
+            .saturating_sub(self.state.dynamic_data.block_lag as u64);
+
+        if rpc_block_with_lag <= self.latest_block_num {
+            trace!(current = current_rpc_block_num, last = self.latest_block_num,
+                "No new blocks, skipping tick...");
+            return;
+        }
+
+        for block_num in (self.latest_block_num + 1)..=rpc_block_with_lag {
+            let block_opt = match self.process_block(block_num).await
+            {
+                Ok(b) => Some(b),
+                Err(e) => {
+                    error!(error = %e, block_number = block_num,
+                        "Failed to process block (very bad)");
+
+                    None
+                }
+            };
+
+            if let Some((block_hash, parent_hash)) = block_opt {
+                self.block_hashes.insert(block_num, block_hash.to_string());
+
+                self.process_blocks_reorg(block_num, parent_hash).await;
+                self.process_tracked_transactions(block_num).await;
+
+                let actual_lag = current_rpc_block_num - block_num;
+
+                if let Err(e) = self.process_logs(block_hash, actual_lag).await {
+                    error!(error = %e, block_number = block_num, block_hash = %block_hash,
+                        "Failed to process logs for block");
+                }
+
+                if let Err(e) = self.event_tx.send(ChainEvent::BlockProcessed {
+                    chain_id: self.state.static_data.id,
+                    chain_name: self.state.static_data.name.clone(),
+                    block_number: block_num,
+                    block_hash: block_hash.to_string(),
+                }).await {
+                    warn!(error = %e, block_number = block_num,
+                        "Failed to send BlockProcessed event");
+                }
+            } else {
+                warn!(block_number = block_num,
+                    "Skipping logs because process_block returned error instead of transactions");
+            }
+
+            self.latest_block_num = block_num;
+        }
     }
 }
 

@@ -1,4 +1,4 @@
-use crate::model::{ChainData, PartialChainUpdate};
+use necko3_types::{ChainData, PartialChainUpdate};
 use async_trait::async_trait;
 
 #[async_trait]

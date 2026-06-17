@@ -3,11 +3,27 @@ use alloy_primitives::{BlockNumber, U256};
 use serde::{Deserialize, Serialize};
 use strum::Display;
 
-#[derive(Display, Debug, Clone)]
+#[derive(Display, Debug, Clone, Serialize, Deserialize)]
 pub enum Asset {
     Native(String),
     /// symbol, contract_address
     Token(String, String),
+}
+
+impl Asset {
+    pub fn to_symbol(self) -> String {
+        match self {
+            Asset::Native(sym) => sym,
+            Asset::Token(sym, _) => sym,
+        }
+    }
+    
+    pub fn as_symbol(&self) -> &str {
+        match self {
+            Asset::Native(sym) => sym,
+            Asset::Token(sym, _) => sym,
+        }
+    }
 }
 
 #[derive(Debug, Clone)]

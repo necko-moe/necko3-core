@@ -1,7 +1,7 @@
 use async_trait::async_trait;
 use uuid::Uuid;
-use necko3_types::UpsertPayment;
-use crate::model::{PaginatedVec, Payment, PaymentFilter, PaymentStatus};
+use necko3_types::{UpsertPayment, Payment, PaymentStatus};
+use crate::model::{PaginatedVec, PaymentFilter};
 
 #[async_trait]
 pub trait PaymentStore: Sync + Send {

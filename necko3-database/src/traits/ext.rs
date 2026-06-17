@@ -1,4 +1,5 @@
-use crate::model::{ChainData, FinalizedPaymentInfo, InvoiceStatus, PaymentStatus, Webhook, WebhookEvent, WebhookStatus};
+use crate::model::FinalizedPaymentInfo;
+use necko3_types::{ChainData, InvoiceStatus, PaymentStatus, Webhook, WebhookEvent, WebhookStatus};
 use crate::traits::DatabaseStore;
 use async_trait::async_trait;
 use chrono::Utc;
@@ -145,7 +146,7 @@ pub trait DatabaseExt: DatabaseStore {
             url,
             payload: event.clone(),
             status: WebhookStatus::Pending,
-            attempts: 0,
+            attempts: 1,
             max_retries: invoice.webhook_max_retries.unwrap_or(5),
             next_retry: now,
             created_at: now,

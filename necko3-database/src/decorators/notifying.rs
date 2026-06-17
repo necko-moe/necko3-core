@@ -1,12 +1,12 @@
 use std::collections::HashMap;
-use crate::model::{ChainData, ExpiredInvoiceInfo, FinalizedPaymentInfo, Invoice, InvoiceFilter, InvoiceStatus, PaginatedVec, PartialChainUpdate, Payment, PaymentFilter, PaymentStatus, TokenData, Webhook, WebhookFilter, WebhookJob, WebhookStatus};
+use crate::model::{ExpiredInvoiceInfo, FinalizedPaymentInfo, InvoiceFilter, PaginatedVec, PaymentFilter, WebhookFilter, WebhookJob};
 use crate::traits::{ChainStore, DatabaseExt, IndexedBlocksStore, InvoiceStore, PaymentStore, TokenStore, WebhookStore, XPubStore};
 use alloy_primitives::{BlockNumber, U256};
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use tokio::sync::mpsc;
 use uuid::Uuid;
-use necko3_types::UpsertPayment;
+use necko3_types::{PaymentStatus, TokenData, PartialChainUpdate, Payment, ChainData, UpsertPayment, Invoice, InvoiceStatus, WebhookStatus, Webhook};
 
 pub struct NotifyingDb<D> {
     inner: D,
@@ -265,7 +265,7 @@ impl<D: DatabaseExt> InvoiceStore for NotifyingDb<D> {
 
     async fn update_invoice_paid(&self, invoice_id: Uuid, paid_raw: U256, new_status: Option<InvoiceStatus>) -> anyhow::Result<()> {
         let invoice_opt = self.inner.get_invoice(invoice_id).await?;
-        let invoice = if let Some(invoice) = invoice_opt { invoice } else { return Ok(()) };
+        let Some(invoice) = invoice_opt else { return Ok(()) };
 
         self.inner.update_invoice_paid(invoice_id, paid_raw, new_status).await?;
 

@@ -1,7 +1,8 @@
 use alloy_primitives::U256;
-use crate::model::{ExpiredInvoiceInfo, Invoice, InvoiceFilter, InvoiceStatus, PaginatedVec};
+use crate::model::{ExpiredInvoiceInfo, InvoiceFilter, PaginatedVec};
 use async_trait::async_trait;
 use uuid::Uuid;
+use necko3_types::{Invoice, InvoiceStatus};
 
 #[async_trait]
 pub trait InvoiceStore: Sync + Send {
