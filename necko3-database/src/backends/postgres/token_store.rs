@@ -1,11 +1,13 @@
 use async_trait::async_trait;
 use necko3_types::TokenData;
 use crate::backends::postgres::PostgresAdapter;
-use crate::traits::TokenStore;
+use crate::error::{DbError, DbResult};
+use crate::traits::token::DbTokenId;
+use crate::traits::{ChainStore, TokenStore};
 
 #[async_trait]
 impl TokenStore for PostgresAdapter {
-    async fn get_tokens(&self, chain_name: &str) -> anyhow::Result<Vec<TokenData>> {
+    async fn get_tokens(&self, chain_name: &str) -> DbResult<Vec<TokenData>> {
         let rows = sqlx::query(
             r#"SELECT t.*
                    FROM tokens t
@@ -21,7 +23,7 @@ impl TokenStore for PostgresAdapter {
             .collect())
     }
 
-    async fn get_token(&self, chain_name: &str, token_symbol: &str) -> anyhow::Result<Option<TokenData>> {
+    async fn get_token(&self, chain_name: &str, token_symbol: &str) -> DbResult<Option<TokenData>> {
         let row = sqlx::query(
             r#"SELECT t.*
                    FROM tokens t
@@ -36,7 +38,7 @@ impl TokenStore for PostgresAdapter {
         Ok(row.map(Self::map_row_to_token))
     }
 
-    async fn get_token_by_id(&self, id: i32) -> anyhow::Result<Option<TokenData>> {
+    async fn get_token_by_id(&self, id: i32) -> DbResult<Option<TokenData>> {
         let row = sqlx::query(
             r#"SELECT * FROM tokens WHERE id = $1"#
         )
@@ -47,7 +49,7 @@ impl TokenStore for PostgresAdapter {
         Ok(row.map(Self::map_row_to_token))
     }
 
-    async fn get_token_by_contract(&self, contract_address: &str) -> anyhow::Result<Option<TokenData>> {
+    async fn get_token_by_contract(&self, contract_address: &str) -> DbResult<Option<TokenData>> {
         let row = sqlx::query(
             r#"SELECT * FROM tokens WHERE contract_address = $1"#
         )
@@ -58,7 +60,7 @@ impl TokenStore for PostgresAdapter {
         Ok(row.map(Self::map_row_to_token))
     }
 
-    async fn get_tokens_with_symbol(&self, token_symbol: &str) -> anyhow::Result<Vec<TokenData>> {
+    async fn get_tokens_with_symbol(&self, token_symbol: &str) -> DbResult<Vec<TokenData>> {
         let rows = sqlx::query(
             r#"SELECT * FROM tokens WHERE symbol = $1"#
         )
@@ -71,8 +73,8 @@ impl TokenStore for PostgresAdapter {
             .collect())
     }
 
-    async fn remove_token(&self, chain_name: &str, token_symbol: &str) -> anyhow::Result<Option<TokenData>> {
-        let result = sqlx::query(
+    async fn remove_token(&self, chain_name: &str, token_symbol: &str) -> DbResult<TokenData> {
+        let result_opt = sqlx::query(
             r#"DELETE FROM tokens t
                    USING chains c
                    WHERE t.chain_id = c.id
@@ -85,59 +87,48 @@ impl TokenStore for PostgresAdapter {
             .fetch_optional(&self.pool)
             .await?;
 
-        Ok(result.map(Self::map_row_to_token))
+        if let Some(row) = result_opt {
+            return Ok(Self::map_row_to_token(row));
+        }
+
+        let chain_exists = self.chain_exists(chain_name).await?;
+        if !chain_exists {
+            return Err(DbError::NotFound {
+                entity: "Chain",
+                id: chain_name.to_string(),
+            });
+        }
+
+        Err(DbError::NotFound {
+            entity: "Token",
+            id: token_symbol.to_string(),
+        })
     }
 
-    async fn add_token(&self, chain_name: &str, token_config: &TokenData) -> anyhow::Result<()> {
-        let result = sqlx::query(
+    async fn add_token(&self, chain_name: &str, token_config: &TokenData) -> DbResult<DbTokenId> {
+        let id_opt: Option<i32> = sqlx::query_scalar(
             r#"INSERT INTO tokens
                (chain_id, symbol, contract_address, decimals, logo_url)
-               SELECT id, $2, $3, $4, $5
+               SELECT chains.id, $2, $3, $4, $5
                FROM chains
-               WHERE name = $1"#
+               WHERE name = $1
+               RETURNING tokens.id"#
         )
             .bind(chain_name)
             .bind(&token_config.symbol)
             .bind(&token_config.contract)
             .bind(token_config.decimals as i16)
             .bind(&token_config.logo_url)
-            .execute(&self.pool)
-            .await?;
-
-        if result.rows_affected() == 0 {
-            anyhow::bail!("Chain {} not found in DB", chain_name)
-        }
-
-        Ok(())
-    }
-
-    async fn get_token_decimals(&self, chain_name: &str, token_symbol: &str) -> anyhow::Result<Option<u8>> {
-        // native
-        let native: Option<(i32, String, i16)> = sqlx::query_as(
-            r#"SELECT id, chains.native_symbol, chains.decimals FROM chains WHERE name = $1"#
-        )
-            .bind(chain_name)
             .fetch_optional(&self.pool)
             .await?;
 
-        let (chain_id, native_symbol, native_decimals) = match native {
-            Some((ci, ns, nd)) => (ci, ns, nd as u8),
-            None => { return Ok(None) }
+        let Some(id) = id_opt else {
+            return Err(DbError::NotFound {
+                entity: "Chain",
+                id: chain_name.to_string(),
+            })
         };
 
-        if native_symbol == token_symbol {
-            return Ok(Some(native_decimals));
-        }
-
-        // token
-        let token_decimals: Option<i16> = sqlx::query_scalar(
-            r#"SELECT tokens.decimals FROM tokens WHERE symbol = $1 AND chain_id = $2"#
-        )
-            .bind(token_symbol)
-            .bind(chain_id)
-            .fetch_optional(&self.pool)
-            .await?;
-
-        Ok(token_decimals.map(|dec| dec as u8))
+        Ok(id)
     }
 }

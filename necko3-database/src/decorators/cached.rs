@@ -1,4 +1,7 @@
+use crate::error::DbResult;
 use crate::model::{ExpiredInvoiceInfo, InvoiceFilter, PaginatedVec, PaymentFilter, WebhookFilter, WebhookJob};
+use crate::traits::chain::DbChainId;
+use crate::traits::token::DbTokenId;
 use crate::traits::{ChainStore, DatabaseExt, IndexedBlocksStore, InvoiceStore, PaymentStore, TokenStore, WebhookStore, XPubStore};
 use alloy_primitives::{BlockNumber, U256};
 use arc_swap::{ArcSwap, ArcSwapOption};
@@ -22,7 +25,7 @@ pub struct CachedDb<D> {
     chains_cache: ArcSwapOption<HashMap<String, ChainData>>,
     tokens_cache: ArcSwap<TokenCacheState>,
 
-    token_decimals: DashMap<(String, String), u8>,
+    symbol_decimals: DashMap<(String, String), u8>,
 
     watch_addresses_cache: DashMap<String, HashSet<String>>,
     chain_blocks_cache: DashMap<String, u64>,
@@ -45,7 +48,7 @@ impl<D> CachedDb<D> {
             inner,
             chains_cache: ArcSwapOption::empty(),
             tokens_cache: ArcSwap::default(),
-            token_decimals: DashMap::default(),
+            symbol_decimals: DashMap::default(),
             watch_addresses_cache: DashMap::default(),
             chain_blocks_cache: DashMap::new(),
         }
@@ -57,7 +60,7 @@ impl<D> CachedDb<D> {
 }
 
 impl<D: DatabaseExt> CachedDb<D> {
-    async fn store_chains_cache(&self) -> anyhow::Result<Vec<ChainData>> {
+    async fn store_chains_cache(&self) -> DbResult<Vec<ChainData>> {
         let chains = self.inner.get_chains().await?;
 
         let chains_cache: HashMap<String, ChainData> = chains
@@ -74,7 +77,7 @@ impl<D: DatabaseExt> CachedDb<D> {
         Ok(chains)
     }
 
-    async fn store_tokens_cache(&self, chain_name: &str) -> anyhow::Result<Vec<TokenData>> {
+    async fn store_tokens_cache(&self, chain_name: &str) -> DbResult<Vec<TokenData>> {
         let tokens = self.inner.get_tokens(chain_name).await?;
 
         let tokens_map: HashMap<String, TokenData> = tokens
@@ -127,7 +130,7 @@ impl<D: DatabaseExt> CachedDb<D> {
         Ok(tokens)
     }
 
-    async fn invalidate_tokens_cache(&self, chain_name: &str) -> anyhow::Result<()> {
+    async fn invalidate_tokens_cache(&self, chain_name: &str) -> DbResult<()> {
         self.tokens_cache.rcu(|curr| {
             let mut new_state = (**curr).clone();
 
@@ -159,7 +162,7 @@ impl<D: DatabaseExt> CachedDb<D> {
 
 #[async_trait]
 impl<D: DatabaseExt> ChainStore for CachedDb<D> {
-    async fn get_chains(&self) -> anyhow::Result<Vec<ChainData>> {
+    async fn get_chains(&self) -> DbResult<Vec<ChainData>> {
         let guard = self.chains_cache.load();
         if let Some(ref chains_cache) = *guard {
             return Ok(chains_cache.values().cloned().collect());
@@ -168,7 +171,7 @@ impl<D: DatabaseExt> ChainStore for CachedDb<D> {
         self.store_chains_cache().await
     }
 
-    async fn get_chain(&self, chain_name: &str) -> anyhow::Result<Option<ChainData>> {
+    async fn get_chain(&self, chain_name: &str) -> DbResult<Option<ChainData>> {
         let guard = self.chains_cache.load();
         if let Some(ref chains_cache) = *guard {
             return Ok(chains_cache.get(chain_name).cloned());
@@ -179,7 +182,7 @@ impl<D: DatabaseExt> ChainStore for CachedDb<D> {
         Ok(chains.into_iter().find(|c| c.name == chain_name))
     }
 
-    async fn get_chain_by_id(&self, id: i32) -> anyhow::Result<Option<ChainData>> {
+    async fn get_chain_by_id(&self, id: i32) -> DbResult<Option<ChainData>> {
         let guard = self.chains_cache.load();
         if let Some(ref chains_cache) = *guard {
             return Ok(chains_cache.values()
@@ -192,30 +195,28 @@ impl<D: DatabaseExt> ChainStore for CachedDb<D> {
         Ok(chains.into_iter().find(|c| c.id == id))
     }
 
-    async fn add_chain(&self, chain_config: &ChainData) -> anyhow::Result<()> {
-        self.inner.add_chain(chain_config).await?;
+    async fn add_chain(&self, chain_config: &ChainData) -> DbResult<DbChainId> {
+        let id = self.inner.add_chain(chain_config).await?;
 
         self.chains_cache.store(None);
 
-        self.token_decimals
+        self.symbol_decimals
             .insert((chain_config.name.clone(), chain_config.native_symbol.clone()), chain_config.decimals);
 
-        Ok(())
+        Ok(id)
     }
 
-    async fn remove_chain(&self, chain_name: &str) -> anyhow::Result<Option<ChainData>> {
+    async fn remove_chain(&self, chain_name: &str) -> DbResult<ChainData> {
         let removed = self.inner.remove_chain(chain_name).await?;
 
-        if removed.is_some() {
-            self.chains_cache.store(None);
-            self.token_decimals
-                .retain(|(chain, _token), _| chain != chain_name);
-        }
+        self.chains_cache.store(None);
+        self.symbol_decimals
+            .retain(|(chain, _token), _| chain != chain_name);
 
         Ok(removed)
     }
 
-    async fn chain_exists(&self, chain_name: &str) -> anyhow::Result<bool> {
+    async fn chain_exists(&self, chain_name: &str) -> DbResult<bool> {
         let guard = self.chains_cache.load();
         if let Some(ref chains_cache) = *guard {
             return Ok(chains_cache.contains_key(chain_name));
@@ -226,25 +227,25 @@ impl<D: DatabaseExt> ChainStore for CachedDb<D> {
         Ok(chains.into_iter().any(|c| c.name == chain_name))
     }
 
-    async fn update_chain_partial(&self, chain_name: &str, chain_update: &PartialChainUpdate) -> anyhow::Result<()> {
+    async fn update_chain_partial(&self, chain_name: &str, chain_update: &PartialChainUpdate) -> DbResult<()> {
         self.inner.update_chain_partial(chain_name, chain_update).await?;
         self.chains_cache.store(None);
         Ok(())
     }
 
-    async fn update_chain_active(&self, chain_name: &str, active: bool) -> anyhow::Result<()> {
+    async fn update_chain_active(&self, chain_name: &str, active: bool) -> DbResult<()> {
         self.inner.update_chain_active(chain_name, active).await?;
         self.chains_cache.store(None);
         Ok(())
     }
 
-    async fn update_chain_block(&self, chain_name: &str, block_num: u64) -> anyhow::Result<()> {
+    async fn update_chain_block(&self, chain_name: &str, block_num: u64) -> DbResult<()> {
         self.inner.update_chain_block(chain_name, block_num).await?;
         self.chain_blocks_cache.insert(chain_name.to_string(), block_num);
         Ok(())
     }
 
-    async fn add_watch_address(&self, chain_name: &str, address: String) -> anyhow::Result<bool> {
+    async fn add_watch_address(&self, chain_name: &str, address: String) -> DbResult<bool> {
         if !self.inner.add_watch_address(chain_name, address.clone()).await? {
             return Ok(false);
         }
@@ -258,7 +259,7 @@ impl<D: DatabaseExt> ChainStore for CachedDb<D> {
         Ok(true)
     }
 
-    async fn remove_watch_address(&self, chain_name: &str, address: &str) -> anyhow::Result<bool> {
+    async fn remove_watch_address(&self, chain_name: &str, address: &str) -> DbResult<bool> {
         if !self.inner.remove_watch_address(chain_name, address).await? {
             return Ok(false);
         }
@@ -272,7 +273,7 @@ impl<D: DatabaseExt> ChainStore for CachedDb<D> {
         Ok(true)
     }
 
-    async fn remove_watch_addresses(&self, chain_name: &str, addresses: &[String]) -> anyhow::Result<Vec<String>> {
+    async fn remove_watch_addresses(&self, chain_name: &str, addresses: &[String]) -> DbResult<Vec<String>> {
         let removed = self.inner.remove_watch_addresses(chain_name, addresses).await?;
 
         if let Some(mut watch_addresses) = self.watch_addresses_cache
@@ -289,7 +290,7 @@ impl<D: DatabaseExt> ChainStore for CachedDb<D> {
 
 #[async_trait]
 impl<D: DatabaseExt> TokenStore for CachedDb<D> {
-    async fn get_tokens(&self, chain_name: &str) -> anyhow::Result<Vec<TokenData>> {
+    async fn get_tokens(&self, chain_name: &str) -> DbResult<Vec<TokenData>> {
         let token_cache = self.tokens_cache.load();
         if let Some(tokens_map) = token_cache.by_chain.get(chain_name) {
             return Ok(tokens_map.values()
@@ -300,7 +301,7 @@ impl<D: DatabaseExt> TokenStore for CachedDb<D> {
         self.store_tokens_cache(chain_name).await
     }
 
-    async fn get_token(&self, chain_name: &str, token_symbol: &str) -> anyhow::Result<Option<TokenData>> {
+    async fn get_token(&self, chain_name: &str, token_symbol: &str) -> DbResult<Option<TokenData>> {
         let tokens_cache = self.tokens_cache.load();
         if let Some(tokens_map) = tokens_cache.by_chain.get(chain_name) {
             return Ok(tokens_map.get(token_symbol).cloned());
@@ -311,7 +312,7 @@ impl<D: DatabaseExt> TokenStore for CachedDb<D> {
         Ok(tokens.into_iter().find(|t| t.symbol == token_symbol))
     }
 
-    async fn get_token_by_id(&self, id: i32) -> anyhow::Result<Option<TokenData>> {
+    async fn get_token_by_id(&self, id: i32) -> DbResult<Option<TokenData>> {
         let tokens_cache = self.tokens_cache.load();
         if let Some(token) = tokens_cache.by_id.get(&id) {
             return Ok(Some((**token).clone()))
@@ -320,7 +321,7 @@ impl<D: DatabaseExt> TokenStore for CachedDb<D> {
         self.inner.get_token_by_id(id).await
     }
 
-    async fn get_token_by_contract(&self, contract_address: &str) -> anyhow::Result<Option<TokenData>> {
+    async fn get_token_by_contract(&self, contract_address: &str) -> DbResult<Option<TokenData>> {
         let tokens_cache = self.tokens_cache.load();
         if let Some(token) = tokens_cache.by_contract.get(contract_address) {
             return Ok(Some((**token).clone()))
@@ -329,7 +330,7 @@ impl<D: DatabaseExt> TokenStore for CachedDb<D> {
         self.inner.get_token_by_contract(contract_address).await
     }
 
-    async fn get_tokens_with_symbol(&self, token_symbol: &str) -> anyhow::Result<Vec<TokenData>> {
+    async fn get_tokens_with_symbol(&self, token_symbol: &str) -> DbResult<Vec<TokenData>> {
         let tokens_cache = self.tokens_cache.load();
         if let Some(tokens) = tokens_cache.by_symbol.get(token_symbol) {
             return Ok(tokens.iter()
@@ -340,178 +341,142 @@ impl<D: DatabaseExt> TokenStore for CachedDb<D> {
         self.inner.get_tokens_with_symbol(token_symbol).await
     }
 
-    async fn remove_token(&self, chain_name: &str, token_symbol: &str) -> anyhow::Result<Option<TokenData>> {
+    async fn remove_token(&self, chain_name: &str, token_symbol: &str) -> DbResult<TokenData> {
         let removed = self.inner.remove_token(chain_name, token_symbol).await?;
 
-        if removed.is_some() {
-            self.invalidate_tokens_cache(chain_name).await?;
-            self.token_decimals
-                .remove(&(chain_name.to_string(), token_symbol.to_string()));
-        }
+        self.invalidate_tokens_cache(chain_name).await?;
+        self.symbol_decimals
+            .remove(&(chain_name.to_string(), token_symbol.to_string()));
 
         Ok(removed)
     }
 
-    async fn add_token(&self, chain_name: &str, token_config: &TokenData) -> anyhow::Result<()> {
-        self.inner.add_token(chain_name, token_config).await?;
+    async fn add_token(&self, chain_name: &str, token_config: &TokenData) -> DbResult<DbTokenId> {
+        let id = self.inner.add_token(chain_name, token_config).await?;
 
         self.invalidate_tokens_cache(chain_name).await?;
 
-        self.token_decimals
+        self.symbol_decimals
             .insert((chain_name.to_owned(), token_config.symbol.clone()), token_config.decimals);
 
-        Ok(())
-    }
-
-    async fn get_token_decimals(&self, chain_name: &str, token_symbol: &str) -> anyhow::Result<Option<u8>> {
-        if let Some(d) = self.token_decimals
-            .get(&(chain_name.to_string(), token_symbol.to_string())) {
-            return Ok(Some(*d.value()))
-        }
-
-        // native
-        let chain_opt = self.get_chain(chain_name).await?;
-
-        let (native_symbol, native_decimals) = match chain_opt {
-            Some(data) => (data.native_symbol, data.decimals),
-            None => { return Ok(None) }
-        };
-
-        self.token_decimals
-            .insert((chain_name.to_owned(), native_symbol.clone()), native_decimals);
-
-        if native_symbol == token_symbol {
-            return Ok(Some(native_decimals));
-        }
-
-        // token
-        let token_opt = self.get_token(chain_name, token_symbol).await?;
-
-        if let Some(token) = token_opt {
-            self.token_decimals
-                .insert((chain_name.to_owned(), token_symbol.to_owned()), token.decimals);
-
-            return Ok(Some(token.decimals))
-        }
-
-        Ok(None)
+        Ok(id)
     }
 }
 
 #[async_trait]
 impl<D: DatabaseExt> InvoiceStore for CachedDb<D> {
-    async fn get_invoices(&self, filter: InvoiceFilter) -> anyhow::Result<PaginatedVec<Invoice>> {
+    async fn get_invoices(&self, filter: InvoiceFilter) -> DbResult<PaginatedVec<Invoice>> {
         self.inner.get_invoices(filter).await
     }
 
-    async fn get_invoice(&self, invoice_id: Uuid) -> anyhow::Result<Option<Invoice>> {
+    async fn get_invoice(&self, invoice_id: Uuid) -> DbResult<Option<Invoice>> {
         self.inner.get_invoice(invoice_id).await
     }
 
-    async fn add_invoice(&self, invoice: &Invoice) -> anyhow::Result<()> {
+    async fn add_invoice(&self, invoice: &Invoice) -> DbResult<()> {
         self.inner.add_invoice(invoice).await
     }
 
-    async fn update_invoice_status(&self, invoice_id: Uuid, status: InvoiceStatus) -> anyhow::Result<()> {
+    async fn update_invoice_status(&self, invoice_id: Uuid, status: InvoiceStatus) -> DbResult<()> {
         self.inner.update_invoice_status(invoice_id, status).await
     }
 
-    async fn get_invoice_by_address(&self, address: &str) -> anyhow::Result<Option<Invoice>> {
+    async fn get_invoice_by_address(&self, address: &str) -> DbResult<Option<Invoice>> {
         self.inner.get_invoice_by_address(address).await
     }
 
-    async fn expire_old_invoices(&self) -> anyhow::Result<Vec<ExpiredInvoiceInfo>> {
+    async fn expire_old_invoices(&self) -> DbResult<Vec<ExpiredInvoiceInfo>> {
         self.inner.expire_old_invoices().await
     }
 
-    async fn update_invoice_paid(&self, invoice_id: Uuid, payment_id: Uuid, paid_raw: U256, new_status: Option<InvoiceStatus>) -> anyhow::Result<()> {
+    async fn update_invoice_paid(&self, invoice_id: Uuid, payment_id: Uuid, paid_raw: U256, new_status: Option<InvoiceStatus>) -> DbResult<()> {
         self.inner.update_invoice_paid(invoice_id, payment_id, paid_raw, new_status).await
     }
 }
 
 #[async_trait]
 impl<D: DatabaseExt> PaymentStore for CachedDb<D> {
-    async fn get_payments(&self, filter: PaymentFilter) -> anyhow::Result<PaginatedVec<Payment>> {
+    async fn get_payments(&self, filter: PaymentFilter) -> DbResult<PaginatedVec<Payment>> {
         self.inner.get_payments(filter).await
     }
 
-    async fn get_payment(&self, payment_id: Uuid) -> anyhow::Result<Option<Payment>> {
+    async fn get_payment(&self, payment_id: Uuid) -> DbResult<Option<Payment>> {
         self.inner.get_payment(payment_id).await
     }
 
-    async fn get_payment_by_tx_hash(&self, tx_hash: String) -> anyhow::Result<Option<Payment>> {
+    async fn get_payment_by_tx_hash(&self, tx_hash: String) -> DbResult<Option<Payment>> {
         self.inner.get_payment_by_tx_hash(tx_hash).await
     }
 
-    async fn get_payments_by_status(&self, status: PaymentStatus) -> anyhow::Result<Vec<Payment>> {
+    async fn get_payments_by_status(&self, status: PaymentStatus) -> DbResult<Vec<Payment>> {
         self.inner.get_payments_by_status(status).await
     }
 
-    async fn upsert_payment(&self, payment: &UpsertPayment) -> anyhow::Result<(Uuid, bool)> {
+    async fn upsert_payment(&self, payment: &UpsertPayment) -> DbResult<(Uuid, bool)> {
         self.inner.upsert_payment(payment).await
     }
 
-    async fn update_payment_status(&self, payment_id: Uuid, status: PaymentStatus) -> anyhow::Result<()> {
+    async fn update_payment_status(&self, payment_id: Uuid, status: PaymentStatus) -> DbResult<()> {
         self.inner.update_payment_status(payment_id, status).await
     }
 
-    async fn update_payment_block(&self, payment_id: Uuid, block_num: u64, block_hash: String) -> anyhow::Result<()> {
+    async fn update_payment_block(&self, payment_id: Uuid, block_num: u64, block_hash: String) -> DbResult<()> {
         self.inner.update_payment_block(payment_id, block_num, block_hash).await
     }
 }
 
 #[async_trait]
 impl<D: DatabaseExt> WebhookStore for CachedDb<D> {
-    async fn get_webhooks(&self, filter: WebhookFilter) -> anyhow::Result<PaginatedVec<Webhook>> {
+    async fn get_webhooks(&self, filter: WebhookFilter) -> DbResult<PaginatedVec<Webhook>> {
         self.inner.get_webhooks(filter).await
     }
 
-    async fn get_webhook(&self, webhook_id: Uuid) -> anyhow::Result<Option<Webhook>> {
+    async fn get_webhook(&self, webhook_id: Uuid) -> DbResult<Option<Webhook>> {
         self.inner.get_webhook(webhook_id).await
     }
 
-    async fn add_webhook(&self, webhook: &Webhook) -> anyhow::Result<()> {
+    async fn add_webhook(&self, webhook: &Webhook) -> DbResult<()> {
         self.inner.add_webhook(webhook).await
     }
 
-    async fn select_pending_webhooks(&self, limit: usize) -> anyhow::Result<Vec<WebhookJob>> {
+    async fn select_pending_webhooks(&self, limit: usize) -> DbResult<Vec<WebhookJob>> {
         self.inner.select_pending_webhooks(limit).await
     }
 
-    async fn update_webhook_status(&self, webhook_id: Uuid, status: WebhookStatus) -> anyhow::Result<()> {
+    async fn update_webhook_status(&self, webhook_id: Uuid, status: WebhookStatus) -> DbResult<()> {
         self.inner.update_webhook_status(webhook_id, status).await
     }
 
-    async fn schedule_webhook_retry(&self, webhook_id: Uuid, attempts: i32, next_retry: DateTime<Utc>) -> anyhow::Result<()> {
+    async fn schedule_webhook_retry(&self, webhook_id: Uuid, attempts: i32, next_retry: DateTime<Utc>) -> DbResult<()> {
         self.inner.schedule_webhook_retry(webhook_id, attempts, next_retry).await
     }
 }
 
 #[async_trait]
 impl<D: DatabaseExt> XPubStore for CachedDb<D> {
-    async fn next_derivation_index(&self, xpub: &str) -> anyhow::Result<u64> {
+    async fn next_derivation_index(&self, xpub: &str) -> DbResult<u64> {
         self.inner.next_derivation_index(xpub).await
     }
 }
 
 #[async_trait]
 impl<D: DatabaseExt> IndexedBlocksStore for CachedDb<D> {
-    async fn get_latest_indexed_blocks(&self, chain_id: i32, limit: u16) -> anyhow::Result<HashMap<BlockNumber, String>> {
+    async fn get_latest_indexed_blocks(&self, chain_id: i32, limit: u16) -> DbResult<HashMap<BlockNumber, String>> {
         self.inner.get_latest_indexed_blocks(chain_id, limit).await
     }
 
-    async fn upsert_indexed_block(&self, chain_id: i32, block_number: u64, block_hash: String) -> anyhow::Result<()> {
+    async fn upsert_indexed_block(&self, chain_id: i32, block_number: u64, block_hash: String) -> DbResult<()> {
         self.inner.upsert_indexed_block(chain_id, block_number, block_hash).await
     }
 
-    async fn upsert_indexed_blocks_batch(&self, chain_id: i32, blocks: &[(BlockNumber, String)]) -> anyhow::Result<()> {
+    async fn upsert_indexed_blocks_batch(&self, chain_id: i32, blocks: &[(BlockNumber, String)]) -> DbResult<()> {
         self.inner.upsert_indexed_blocks_batch(chain_id, blocks).await
     }
 }
 
 #[async_trait]
 impl<D: DatabaseExt> DatabaseExt for CachedDb<D> {
-    async fn get_latest_block(&self, chain_name: &str) -> anyhow::Result<Option<u64>> {
+    async fn get_latest_block(&self, chain_name: &str) -> DbResult<Option<u64>> {
         if let Some(latest_block) = self.chain_blocks_cache.get(chain_name)
             .map(|x| *x.value()) {
             return Ok(Some(latest_block));
@@ -527,7 +492,7 @@ impl<D: DatabaseExt> DatabaseExt for CachedDb<D> {
         } else { Ok(None) }
     }
 
-    async fn get_watch_addresses(&self, chain_name: &str) -> anyhow::Result<Option<HashSet<String>>> {
+    async fn get_watch_addresses(&self, chain_name: &str) -> DbResult<Option<HashSet<String>>> {
         if let Some(watch_addresses) = self.watch_addresses_cache.get(chain_name)
             .map(|x| x.value().clone()) {
             return Ok(Some(watch_addresses));
@@ -540,5 +505,39 @@ impl<D: DatabaseExt> DatabaseExt for CachedDb<D> {
             Ok(self.watch_addresses_cache.get(chain_name)
                 .map(|x| x.value().clone()))
         } else { Ok(None) }
+    }
+
+    async fn get_symbol_decimals(&self, chain_name: &str, symbol: &str) -> DbResult<Option<u8>> {
+        if let Some(d) = self.symbol_decimals
+            .get(&(chain_name.to_string(), symbol.to_string())) {
+            return Ok(Some(*d.value()))
+        }
+
+        // native
+        let chain_opt = self.get_chain(chain_name).await?;
+
+        let (native_symbol, native_decimals) = match chain_opt {
+            Some(data) => (data.native_symbol, data.decimals),
+            None => { return Ok(None) }
+        };
+
+        self.symbol_decimals
+            .insert((chain_name.to_owned(), native_symbol.clone()), native_decimals);
+
+        if native_symbol == symbol {
+            return Ok(Some(native_decimals));
+        }
+
+        // token
+        let token_opt = self.get_token(chain_name, symbol).await?;
+
+        if let Some(token) = token_opt {
+            self.symbol_decimals
+                .insert((chain_name.to_owned(), symbol.to_owned()), token.decimals);
+
+            return Ok(Some(token.decimals))
+        }
+
+        Ok(None)
     }
 }

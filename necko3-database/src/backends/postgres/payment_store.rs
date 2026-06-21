@@ -5,16 +5,17 @@ use sqlx::types::BigDecimal;
 use uuid::Uuid;
 use necko3_types::{Payment, PaymentStatus, UpsertPayment};
 use crate::backends::postgres::PostgresAdapter;
+use crate::error::{DbError, DbResult};
 use crate::model::{PaginatedVec, PaymentFilter};
 use crate::traits::PaymentStore;
 
 #[async_trait]
 impl PaymentStore for PostgresAdapter {
-    async fn get_payments(&self, filter: PaymentFilter) -> anyhow::Result<PaginatedVec<Payment>> {
+    async fn get_payments(&self, filter: PaymentFilter) -> DbResult<PaginatedVec<Payment>> {
         fn apply_filters(
             builder: &mut QueryBuilder<sqlx::Postgres>,
             filter: &PaymentFilter
-        ) -> anyhow::Result<()> {
+        ) {
             if let Some(ref from) = filter.from {
                 builder.push(r#" AND "from" = "#);
                 builder.push_bind(from);
@@ -49,14 +50,12 @@ impl PaymentStore for PostgresAdapter {
                 builder.push(" AND status = ");
                 builder.push_bind(status.to_string());
             }
-
-            Ok(())
         }
 
         let mut count_builder: QueryBuilder<sqlx::Postgres> = QueryBuilder::new(
             "SELECT count(*) FROM payments WHERE TRUE");
 
-        apply_filters(&mut count_builder, &filter)?;
+        apply_filters(&mut count_builder, &filter);
 
         let total: i64 = count_builder
             .build_query_as::<(i64,)>()
@@ -71,7 +70,7 @@ impl PaymentStore for PostgresAdapter {
                 FROM payments WHERE TRUE"#
         );
 
-        apply_filters(&mut data_builder, &filter)?;
+        apply_filters(&mut data_builder, &filter);
 
         data_builder.push(" ORDER BY created_at DESC LIMIT ");
         data_builder.push_bind(filter.pagination.limit as i64);
@@ -86,7 +85,7 @@ impl PaymentStore for PostgresAdapter {
         let payments: Vec<Payment> = rows
             .into_iter()
             .map(Self::map_row_to_payment)
-            .collect::<anyhow::Result<_>>()?;
+            .collect::<DbResult<_>>()?;
 
         Ok(PaginatedVec::new(
             payments,
@@ -96,7 +95,7 @@ impl PaymentStore for PostgresAdapter {
         ))
     }
 
-    async fn get_payment(&self, payment_id: Uuid) -> anyhow::Result<Option<Payment>> {
+    async fn get_payment(&self, payment_id: Uuid) -> DbResult<Option<Payment>> {
         sqlx::query(
             r#"SELECT id, "from", "to", network, tx_hash, token, amount_raw::TEXT,
                        block_number, block_hash::TEXT, status, created_at, log_index
@@ -109,7 +108,7 @@ impl PaymentStore for PostgresAdapter {
             .transpose()
     }
 
-    async fn get_payment_by_tx_hash(&self, tx_hash: String) -> anyhow::Result<Option<Payment>> {
+    async fn get_payment_by_tx_hash(&self, tx_hash: String) -> DbResult<Option<Payment>> {
         sqlx::query(
             r#"SELECT id, "from", "to", network, tx_hash, token, amount_raw::TEXT,
                        block_number, block_hash::TEXT, status, created_at, log_index
@@ -122,7 +121,7 @@ impl PaymentStore for PostgresAdapter {
             .transpose()
     }
 
-    async fn get_payments_by_status(&self, status: PaymentStatus) -> anyhow::Result<Vec<Payment>> {
+    async fn get_payments_by_status(&self, status: PaymentStatus) -> DbResult<Vec<Payment>> {
         let rows = sqlx::query(
             r#"SELECT id, "from", "to", network, tx_hash, token, amount_raw::TEXT,
                        block_number, block_hash::TEXT, status, created_at, log_index
@@ -134,8 +133,10 @@ impl PaymentStore for PostgresAdapter {
         rows.into_iter().map(Self::map_row_to_payment).collect()
     }
 
-    async fn upsert_payment(&self, payment: &UpsertPayment) -> anyhow::Result<(Uuid, bool)> {
-        let amount_bd = BigDecimal::from_str(&payment.amount_raw.to_string())?;
+    async fn upsert_payment(&self, payment: &UpsertPayment) -> DbResult<(Uuid, bool)> {
+        let amount_bd = BigDecimal::from_str(&payment.amount_raw.to_string())
+            .map_err(|e| DbError::DataCorruption(
+                format!("Failed to parse amount_raw ({}) as BigDecimal: {}", payment.amount_raw, e)))?;
 
         let token = payment.asset.as_symbol();
         
@@ -167,8 +168,8 @@ impl PaymentStore for PostgresAdapter {
         Ok((id, inserted))
     }
 
-    async fn update_payment_status(&self, payment_id: Uuid, status: PaymentStatus) -> anyhow::Result<()> {
-        sqlx::query(
+    async fn update_payment_status(&self, payment_id: Uuid, status: PaymentStatus) -> DbResult<()> {
+        let res = sqlx::query(
             "UPDATE payments SET status = $1 WHERE id = $2"
         )
             .bind(status.to_string())
@@ -176,11 +177,18 @@ impl PaymentStore for PostgresAdapter {
             .execute(&self.pool)
             .await?;
 
+        if res.rows_affected() == 0 {
+            return Err(DbError::NotFound {
+                entity: "Payment",
+                id: payment_id.to_string(),
+            });
+        }
+
         Ok(())
     }
 
-    async fn update_payment_block(&self, payment_id: Uuid, block_num: u64, block_hash: String) -> anyhow::Result<()> {
-        sqlx::query(
+    async fn update_payment_block(&self, payment_id: Uuid, block_num: u64, block_hash: String) -> DbResult<()> {
+        let res = sqlx::query(
             "UPDATE payments SET block_number = $1, block_hash = $2 WHERE id = $3"
         )
             .bind(block_num as i64)
@@ -188,6 +196,13 @@ impl PaymentStore for PostgresAdapter {
             .bind(payment_id)
             .execute(&self.pool)
             .await?;
+
+        if res.rows_affected() == 0 {
+            return Err(DbError::NotFound {
+                entity: "Payment",
+                id: payment_id.to_string(),
+            });
+        }
 
         Ok(())
     }

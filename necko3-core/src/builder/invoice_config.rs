@@ -1,3 +1,5 @@
+pub mod error;
+
 use alloy_primitives::U256;
 use chrono::{DateTime, Utc};
 

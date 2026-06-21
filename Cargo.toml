@@ -7,8 +7,15 @@ members = [
     "necko3-types",
 ]
 
+[workspace.package]
+version = "0.2.0"
+authors = ["necko1"]
+edition = "2024"
+
 [workspace.dependencies]
 tokio = { version = "1", features = ["sync"] }
 tracing = "0.1"
+
+thiserror = "2"
 
 serde = { version = "1", features = ["derive"] }

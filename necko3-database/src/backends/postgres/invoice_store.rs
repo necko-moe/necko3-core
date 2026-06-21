@@ -6,12 +6,13 @@ use sqlx::types::BigDecimal;
 use uuid::Uuid;
 use necko3_types::{Invoice, InvoiceStatus};
 use crate::backends::postgres::PostgresAdapter;
+use crate::error::{DbError, DbResult};
 use crate::model::{ExpiredInvoiceInfo, InvoiceFilter, PaginatedVec};
 use crate::traits::InvoiceStore;
 
 #[async_trait]
 impl InvoiceStore for PostgresAdapter {
-    async fn get_invoices(&self, filter: InvoiceFilter) -> anyhow::Result<PaginatedVec<Invoice>> {
+    async fn get_invoices(&self, filter: InvoiceFilter) -> DbResult<PaginatedVec<Invoice>> {
         fn apply_filters(
             builder: &mut QueryBuilder<sqlx::Postgres>,
             filter: &InvoiceFilter
@@ -71,7 +72,7 @@ impl InvoiceStore for PostgresAdapter {
         let invoices: Vec<Invoice> = rows
             .into_iter()
             .map(Self::map_row_to_invoice)
-            .collect::<anyhow::Result<_>>()?;
+            .collect::<DbResult<_>>()?;
 
         Ok(PaginatedVec::new(
             invoices,
@@ -81,7 +82,7 @@ impl InvoiceStore for PostgresAdapter {
         ))
     }
 
-    async fn get_invoice(&self, invoice_id: Uuid) -> anyhow::Result<Option<Invoice>> {
+    async fn get_invoice(&self, invoice_id: Uuid) -> DbResult<Option<Invoice>> {
         sqlx::query(
             r#"SELECT
                        id, address, address_index, network, token, amount_raw::TEXT, paid_raw::TEXT,
@@ -95,9 +96,13 @@ impl InvoiceStore for PostgresAdapter {
             .transpose()
     }
 
-    async fn add_invoice(&self, invoice: &Invoice) -> anyhow::Result<()> {
-        let amount_bd = BigDecimal::from_str(&invoice.amount_raw.to_string())?;
-        let paid_bd = BigDecimal::from_str(&invoice.paid_raw.to_string())?;
+    async fn add_invoice(&self, invoice: &Invoice) -> DbResult<()> {
+        let amount_bd = BigDecimal::from_str(&invoice.amount_raw.to_string())
+            .map_err(|e| DbError::DataCorruption(
+                format!("Failed to parse amount_raw ({}) as BigDecimal: {}", invoice.amount_raw, e)))?;
+        let paid_bd = BigDecimal::from_str(&invoice.paid_raw.to_string())
+            .map_err(|e| DbError::DataCorruption(
+                format!("Failed to parse paid_raw ({}) as BigDecimal: {}", invoice.paid_raw, e)))?;
 
         sqlx::query(
             r#"INSERT INTO invoices
@@ -125,8 +130,8 @@ impl InvoiceStore for PostgresAdapter {
         Ok(())
     }
 
-    async fn update_invoice_status(&self, invoice_id: Uuid, status: InvoiceStatus) -> anyhow::Result<()> {
-        sqlx::query(
+    async fn update_invoice_status(&self, invoice_id: Uuid, status: InvoiceStatus) -> DbResult<()> {
+        let res = sqlx::query(
             "UPDATE invoices SET status = $1 WHERE id = $2"
         )
             .bind(status.to_string())
@@ -134,10 +139,17 @@ impl InvoiceStore for PostgresAdapter {
             .execute(&self.pool)
             .await?;
 
+        if res.rows_affected() == 0 {
+            return Err(DbError::NotFound {
+                entity: "Invoice",
+                id: invoice_id.to_string(),
+            });
+        }
+        
         Ok(())
     }
 
-    async fn get_invoice_by_address(&self, address: &str) -> anyhow::Result<Option<Invoice>> {
+    async fn get_invoice_by_address(&self, address: &str) -> DbResult<Option<Invoice>> {
         let row = sqlx::query(
             r#"SELECT
                        id, address, address_index, network, token, amount_raw::TEXT, paid_raw::TEXT,
@@ -151,7 +163,7 @@ impl InvoiceStore for PostgresAdapter {
         row.map(Self::map_row_to_invoice).transpose()
     }
 
-    async fn expire_old_invoices(&self) -> anyhow::Result<Vec<ExpiredInvoiceInfo>> {
+    async fn expire_old_invoices(&self) -> DbResult<Vec<ExpiredInvoiceInfo>> {
         let rows = sqlx::query_as::<_, ExpiredInvoiceInfo>(
             r#"UPDATE invoices
                    SET status = 'Expired'
@@ -164,10 +176,12 @@ impl InvoiceStore for PostgresAdapter {
         Ok(rows)
     }
 
-    async fn update_invoice_paid(&self, invoice_id: Uuid, _payment_id: Uuid, paid_raw: U256, new_status: Option<InvoiceStatus>) -> anyhow::Result<()> {
-        let paid_bd = BigDecimal::from_str(&paid_raw.to_string())?;
+    async fn update_invoice_paid(&self, invoice_id: Uuid, _payment_id: Uuid, paid_raw: U256, new_status: Option<InvoiceStatus>) -> DbResult<()> {
+        let paid_bd = BigDecimal::from_str(&paid_raw.to_string())
+            .map_err(|e| DbError::DataCorruption(
+                format!("Failed to parse paid_raw ({}) as BigDecimal: {}", paid_raw, e)))?;
 
-        sqlx::query(
+        let res = sqlx::query(
             r#"UPDATE invoices SET paid_raw = $1,
                     status = COALESCE($2, status)
                 WHERE id = $3"#
@@ -178,6 +192,13 @@ impl InvoiceStore for PostgresAdapter {
             .execute(&self.pool)
             .await?;
 
+        if res.rows_affected() == 0 {
+            return Err(DbError::NotFound {
+                entity: "Invoice",
+                id: invoice_id.to_string(),
+            });
+        }
+        
         Ok(())
     }
 }

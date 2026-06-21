@@ -8,6 +8,7 @@ pub use crate::traits::xpub::XPubStore;
 pub use crate::traits::indexed_blocks::IndexedBlocksStore;
 
 pub use async_trait::async_trait;
+use crate::error::DbResult;
 
 pub mod chain;
 pub mod token;
@@ -20,7 +21,7 @@ pub mod indexed_blocks;
 
 #[async_trait]
 pub trait DatabaseAdapter: Send + Sync {
-    async fn new(database_url: &str, max_connections: u32) -> anyhow::Result<Self> where Self: Sized;
+    async fn new(database_url: &str, max_connections: u32) -> DbResult<Self> where Self: Sized;
 }
 
 pub trait DatabaseStore:

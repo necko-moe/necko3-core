@@ -3,10 +3,12 @@ use crate::traits::*;
 use async_trait::async_trait;
 use necko3_types::{ChainData, PartialChainUpdate};
 use std::collections::HashSet;
+use crate::error::{DbError, DbResult};
+use crate::traits::chain::DbChainId;
 
 #[async_trait]
 impl ChainStore for PostgresAdapter {
-    async fn get_chains(&self) -> anyhow::Result<Vec<ChainData>> {
+    async fn get_chains(&self) -> DbResult<Vec<ChainData>> {
         let rows = sqlx::query(
             r#"SELECT * FROM chains"#
         )
@@ -18,7 +20,7 @@ impl ChainStore for PostgresAdapter {
             .collect()
     }
 
-    async fn get_chain(&self, chain_name: &str) -> anyhow::Result<Option<ChainData>> {
+    async fn get_chain(&self, chain_name: &str) -> DbResult<Option<ChainData>> {
         let row = sqlx::query(
             r#"SELECT * FROM chains WHERE name = $1"#
         )
@@ -29,7 +31,7 @@ impl ChainStore for PostgresAdapter {
         row.map(Self::map_row_to_chain).transpose()
     }
 
-    async fn get_chain_by_id(&self, id: i32) -> anyhow::Result<Option<ChainData>> {
+    async fn get_chain_by_id(&self, id: i32) -> DbResult<Option<ChainData>> {
         let row = sqlx::query(
             r#"SELECT * FROM chains WHERE id = $1"#
         )
@@ -40,13 +42,14 @@ impl ChainStore for PostgresAdapter {
         row.map(Self::map_row_to_chain).transpose()
     }
 
-    async fn add_chain(&self, chain_config: &ChainData) -> anyhow::Result<()> {
-        sqlx::query(
+    async fn add_chain(&self, chain_config: &ChainData) -> DbResult<DbChainId> {
+        let id: i32 = sqlx::query_scalar(
             r#"INSERT INTO chains
                     (name, rpc_urls, chain_type, xpub, native_symbol, decimals,
                      last_processed_block, block_lag, required_confirmations, active, logo_url,
                      watch_addresses, safe_lag)
-                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)"#,
+                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
+                    RETURNING id"#,
         )
             .bind(&chain_config.name)
             .bind(&chain_config.rpc_urls)
@@ -62,24 +65,31 @@ impl ChainStore for PostgresAdapter {
             .bind(chain_config.watch_addresses.iter()
                 .collect::<Vec<_>>())
             .bind(chain_config.safe_lag as i16)
-            .execute(&self.pool)
+            .fetch_one(&self.pool)
             .await?;
 
-        Ok(())
+        Ok(id)
     }
 
-    async fn remove_chain(&self, chain_name: &str) -> anyhow::Result<Option<ChainData>> {
-        let result = sqlx::query(
+    async fn remove_chain(&self, chain_name: &str) -> DbResult<ChainData> {
+        let result_opt = sqlx::query(
             "DELETE FROM chains WHERE name = $1 RETURNING *"
         )
             .bind(chain_name)
             .fetch_optional(&self.pool)
             .await?;
 
-        result.map(Self::map_row_to_chain).transpose()
+        let Some(result) = result_opt else {
+            return Err(DbError::NotFound {
+                entity: "Chain",
+                id: chain_name.to_string(),
+            })
+        };
+
+        Self::map_row_to_chain(result)
     }
 
-    async fn chain_exists(&self, chain_name: &str) -> anyhow::Result<bool> {
+    async fn chain_exists(&self, chain_name: &str) -> DbResult<bool> {
         let exists: bool = sqlx::query_scalar(
             "SELECT EXISTS(SELECT 1 FROM chains WHERE name = $1)"
         )
@@ -90,7 +100,7 @@ impl ChainStore for PostgresAdapter {
         Ok(exists)
     }
 
-    async fn update_chain_partial(&self, chain_name: &str, chain_update: &PartialChainUpdate) -> anyhow::Result<()> {
+    async fn update_chain_partial(&self, chain_name: &str, chain_update: &PartialChainUpdate) -> DbResult<()> {
         let result = sqlx::query(
             r#"UPDATE chains SET
                        rpc_urls = COALESCE($1, rpc_urls),
@@ -116,13 +126,16 @@ impl ChainStore for PostgresAdapter {
             .await?;
 
         if result.rows_affected() == 0 {
-            return Err(anyhow::anyhow!("Chain {} not found in DB", chain_name));
+            return Err(DbError::NotFound {
+                entity: "Chain",
+                id: chain_name.to_string(),
+            });
         }
 
         Ok(())
     }
 
-    async fn update_chain_active(&self, chain_name: &str, active: bool) -> anyhow::Result<()> {
+    async fn update_chain_active(&self, chain_name: &str, active: bool) -> DbResult<()> {
         let result = sqlx::query(
             "UPDATE chains SET active = $1 WHERE name = $2"
         )
@@ -132,13 +145,16 @@ impl ChainStore for PostgresAdapter {
             .await?;
 
         if result.rows_affected() == 0 {
-            return Err(anyhow::anyhow!("Chain {} not found in DB", chain_name));
+            return Err(DbError::NotFound {
+                entity: "Chain",
+                id: chain_name.to_string(),
+            });
         }
 
         Ok(())
     }
 
-    async fn update_chain_block(&self, chain_name: &str, block_num: u64) -> anyhow::Result<()> {
+    async fn update_chain_block(&self, chain_name: &str, block_num: u64) -> DbResult<()> {
         let result = sqlx::query(
             "UPDATE chains SET last_processed_block = $1 WHERE name = $2"
         )
@@ -148,13 +164,16 @@ impl ChainStore for PostgresAdapter {
             .await?;
 
         if result.rows_affected() == 0 {
-            return Err(anyhow::anyhow!("Chain {} not found in DB", chain_name));
+            return Err(DbError::NotFound {
+                entity: "Chain",
+                id: chain_name.to_string(),
+            });
         }
 
         Ok(())
     }
 
-    async fn add_watch_address(&self, chain_name: &str, address: String) -> anyhow::Result<bool> {
+    async fn add_watch_address(&self, chain_name: &str, address: String) -> DbResult<bool> {
         let result = sqlx::query(
             r#"UPDATE chains SET watch_addresses = ARRAY_APPEND(watch_addresses, $1)
                    WHERE name = $2 AND NOT ($1 = ANY(watch_addresses))"#
@@ -164,10 +183,22 @@ impl ChainStore for PostgresAdapter {
             .execute(&self.pool)
             .await?;
 
-        Ok(result.rows_affected() > 0)
+        if result.rows_affected() > 0 {
+            return Ok(true)
+        }
+
+        let exists = self.chain_exists(chain_name).await?;
+        if !exists {
+            return Err(DbError::NotFound {
+                entity: "Chain",
+                id: chain_name.to_string(),
+            });
+        }
+
+        Ok(false)
     }
 
-    async fn remove_watch_address(&self, chain_name: &str, address: &str) -> anyhow::Result<bool> {
+    async fn remove_watch_address(&self, chain_name: &str, address: &str) -> DbResult<bool> {
         let result = sqlx::query(
             r#"UPDATE chains SET watch_addresses = ARRAY_REMOVE(watch_addresses, $1)
                    WHERE name = $2 AND ($1 = ANY(watch_addresses))"#
@@ -177,22 +208,45 @@ impl ChainStore for PostgresAdapter {
             .execute(&self.pool)
             .await?;
 
-        Ok(result.rows_affected() > 0)
+        if result.rows_affected() > 0 {
+            return Ok(true);
+        }
+
+        let exists = self.chain_exists(chain_name).await?;
+        if !exists {
+            return Err(DbError::NotFound {
+                entity: "Chain",
+                id: chain_name.to_string(),
+            });
+        }
+
+        Ok(false)
     }
 
-    async fn remove_watch_addresses(&self, chain_name: &str, addresses: &[String]) -> anyhow::Result<Vec<String>> {
+    async fn remove_watch_addresses(&self, chain_name: &str, addresses: &[String]) -> DbResult<Vec<String>> {
         let to_remove: HashSet<&str> = addresses.iter()
             .map(|s| s.as_str())
             .collect();
 
         let mut tx = self.pool.begin().await?;
 
-        let old_addresses: Vec<String> = sqlx::query_scalar(
+        let old_addresses_opt: Option<Vec<String>> = sqlx::query_scalar(
             "SELECT chains.watch_addresses FROM chains WHERE name = $1 FOR UPDATE"
         )
             .bind(chain_name)
-            .fetch_one(&mut *tx)
+            .fetch_optional(&mut *tx)
             .await?;
+
+        let old_addresses = match old_addresses_opt {
+            Some(addrs) => addrs,
+            None => {
+                tx.rollback().await?;
+                return Err(DbError::NotFound {
+                    entity: "Chain",
+                    id: chain_name.to_string(),
+                });
+            }
+        };
 
         let (removed, to_keep) = old_addresses.into_iter()
             .partition(|address| to_remove.contains(address.as_str()));

@@ -2,23 +2,25 @@ use std::sync::atomic::Ordering;
 use async_trait::async_trait;
 use necko3_types::TokenData;
 use crate::backends::in_memory::InMemoryAdapter;
+use crate::error::{DbError, DbResult};
+use crate::traits::token::DbTokenId;
 use crate::traits::TokenStore;
 
 #[async_trait]
 impl TokenStore for InMemoryAdapter {
-    async fn get_tokens(&self, chain_name: &str) -> anyhow::Result<Vec<TokenData>> {
+    async fn get_tokens(&self, chain_name: &str) -> DbResult<Vec<TokenData>> {
         Ok(self.tokens.read().get(chain_name)
             .map(|c| c.values().cloned().collect())
             .unwrap_or_default())
     }
 
-    async fn get_token(&self, chain_name: &str, token_symbol: &str) -> anyhow::Result<Option<TokenData>> {
+    async fn get_token(&self, chain_name: &str, token_symbol: &str) -> DbResult<Option<TokenData>> {
         Ok(self.tokens.read().get(chain_name)
             .and_then(|c|
                 c.get(token_symbol).cloned()))
     }
 
-    async fn get_token_by_id(&self, id: i32) -> anyhow::Result<Option<TokenData>> {
+    async fn get_token_by_id(&self, id: i32) -> DbResult<Option<TokenData>> {
         Ok(self.tokens.read()
             .values()
             .flat_map(|c| c.values())
@@ -26,7 +28,7 @@ impl TokenStore for InMemoryAdapter {
             .cloned())
     }
 
-    async fn get_token_by_contract(&self, contract_address: &str) -> anyhow::Result<Option<TokenData>> {
+    async fn get_token_by_contract(&self, contract_address: &str) -> DbResult<Option<TokenData>> {
         Ok(self.tokens.read()
             .values()
             .flat_map(|c| c.values())
@@ -34,7 +36,7 @@ impl TokenStore for InMemoryAdapter {
             .cloned())
     }
 
-    async fn get_tokens_with_symbol(&self, token_symbol: &str) -> anyhow::Result<Vec<TokenData>> {
+    async fn get_tokens_with_symbol(&self, token_symbol: &str) -> DbResult<Vec<TokenData>> {
         Ok(self.tokens.read()
             .values()
             .flat_map(|c| c.values())
@@ -43,43 +45,46 @@ impl TokenStore for InMemoryAdapter {
             .collect())
     }
 
-    async fn remove_token(&self, chain_name: &str, token_symbol: &str) -> anyhow::Result<Option<TokenData>> {
-        let deleted = self.tokens.write()
+    async fn remove_token(&self, chain_name: &str, token_symbol: &str) -> DbResult<TokenData> {
+        if !self.chains.read().contains_key(chain_name) {
+            return Err(DbError::NotFound {
+                entity: "Chain",
+                id: chain_name.to_string(),
+            })
+        }
+
+        let token_opt = self.tokens.write()
             .get_mut(chain_name)
             .and_then(|c| c.remove(token_symbol));
 
-        Ok(deleted)
+        let Some(token) = token_opt else {
+            return Err(DbError::NotFound {
+                entity: "Token",
+                id: token_symbol.to_string(),
+            })
+        };
+
+        Ok(token)
     }
 
-    async fn add_token(&self, chain_name: &str, token_config: &TokenData) -> anyhow::Result<()> {
+    async fn add_token(&self, chain_name: &str, token_config: &TokenData) -> DbResult<DbTokenId> {
         if !self.chains.read().contains_key(chain_name) {
-            anyhow::bail!("Chain {} not found in DB", chain_name)
+            return Err(DbError::NotFound {
+                entity: "Chain",
+                id: chain_name.to_string(),
+            })
         }
 
+        let next_id = self.tokens_last_id.fetch_add(1, Ordering::SeqCst);
 
         let mut token_config = token_config.clone();
-        token_config.id = self.tokens_last_id.fetch_add(1, Ordering::SeqCst) ;
+        token_config.id = next_id;
 
         self.tokens.write()
             .entry(chain_name.to_string())
             .or_default()
             .insert(token_config.symbol.clone(), token_config.clone());
 
-        Ok(())
-    }
-
-    async fn get_token_decimals(&self, chain_name: &str, token_symbol: &str) -> anyhow::Result<Option<u8>> {
-        if let Some(chain) = self.chains.read()
-            .get(chain_name)
-            && chain.native_symbol == token_symbol {
-                return Ok(Some(chain.decimals));
-            }
-
-        let decimals = self.tokens.read()
-            .get(chain_name)
-            .and_then(|c| c.get(token_symbol))
-            .map(|token| token.decimals);
-
-        Ok(decimals)
+        Ok(next_id)
     }
 }

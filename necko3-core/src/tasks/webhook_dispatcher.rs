@@ -1,3 +1,5 @@
+pub mod error;
+
 use std::sync::Arc;
 use std::time::Duration;
 use chrono::Utc;
@@ -10,6 +12,7 @@ use tracing::{debug, error, info, instrument, trace, warn, Instrument};
 use necko3_database::model::WebhookJob;
 use necko3_database::traits::WebhookStore;
 use necko3_types::WebhookStatus;
+use crate::tasks::webhook_dispatcher::error::WebhookError;
 
 pub struct NeckoWebhookDispatcher<D> {
     db: Arc<D>,
@@ -94,12 +97,13 @@ impl<D: WebhookStore + 'static> NeckoWebhookDispatcher<D> {
 }
 
 #[instrument(level = "trace", skip(secret, body))] // :)
-fn generate_signature(timestamp: &str, secret: &str, body: &str) -> anyhow::Result<String> {
+fn generate_signature(timestamp: &str, secret: &str, body: &str) -> Result<String, WebhookError> {
     trace!("Generating HMAC signature");
     let signed_body = format!("{}.{}", timestamp, body);
 
     let mut mac: Hmac<Sha256> = Hmac::new_from_slice(secret.as_bytes())
-        .map_err(|e| anyhow::anyhow!("HMAC key initialization failed: {}", e))?;
+        .map_err(|e| WebhookError::Crypto(format!("HMAC key init failed: {}", e)))?;
+
     mac.update(signed_body.as_bytes());
     let result = mac.finalize();
 
@@ -111,7 +115,7 @@ async fn process_webhook<D: WebhookStore>(
     db: Arc<D>,
     client: Arc<Client>,
     job: WebhookJob
-) -> anyhow::Result<()> {
+) -> Result<(), WebhookError> {
     let body_string = match serde_json::to_string(&job.payload.0) {
         Ok(s) => s,
         Err(e) => {
@@ -119,7 +123,7 @@ async fn process_webhook<D: WebhookStore>(
                 "Failed to serialize webhook payload. Dropping job");
 
             db.update_webhook_status(job.id, WebhookStatus::Failed).await?;
-            anyhow::bail!(e)
+            return Err(WebhookError::Serialization(e));
         }
     };
 
@@ -132,7 +136,7 @@ async fn process_webhook<D: WebhookStore>(
                 "Signature generation failed. Dropping job");
 
             db.update_webhook_status(job.id, WebhookStatus::Failed).await?;
-            anyhow::bail!(e)
+            return Err(e);
         }
     };
 
@@ -175,7 +179,7 @@ async fn handle_retry<D: WebhookStore>(
     db: Arc<D>,
     job: WebhookJob,
     reason: String,
-) -> anyhow::Result<()> {
+) -> Result<(), WebhookError> {
     let new_attempts = job.attempts + 1;
 
     if new_attempts > job.max_retries {

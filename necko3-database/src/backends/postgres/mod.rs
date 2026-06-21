@@ -17,6 +17,7 @@ use sqlx::{PgPool, Row};
 use std::str::FromStr;
 use uuid::Uuid;
 use necko3_types::{ChainData, ChainType, Invoice, InvoiceStatus, Payment, PaymentStatus, TokenData, Webhook, WebhookEvent, WebhookStatus};
+use crate::error::{DbError, DbResult};
 
 pub struct PostgresAdapter {
     pub(super) pool: PgPool
@@ -24,7 +25,7 @@ pub struct PostgresAdapter {
 
 #[async_trait]
 impl DatabaseAdapter for PostgresAdapter {
-    async fn new(database_url: &str, max_connections: u32) -> anyhow::Result<Self>
+    async fn new(database_url: &str, max_connections: u32) -> DbResult<Self>
     where
         Self: Sized
     {
@@ -50,10 +51,11 @@ impl PostgresAdapter {
 
     pub(super) fn map_row_to_chain(
         row: PgRow,
-    ) -> anyhow::Result<ChainData> {
+    ) -> DbResult<ChainData> {
         let chain_str: String = row.get("chain_type");
         let chain_type: ChainType = chain_str.parse()
-            .map_err(|e| anyhow::anyhow!("Invalid chain type: {}", e))?;
+            .map_err(|e| DbError::DataCorruption(
+                format!("Invalid chain type '{}': {}", chain_str, e)))?;
 
         Ok(ChainData {
             id: row.get("id"),
@@ -89,26 +91,33 @@ impl PostgresAdapter {
 
     pub(super) fn map_row_to_invoice(
         row: PgRow
-    ) -> anyhow::Result<Invoice> {
+    ) -> DbResult<Invoice> {
         let status_str: String = row.get("status");
         let status: InvoiceStatus = status_str.parse()
-            .map_err(|e| anyhow::anyhow!("Unknown invoice status '{}' from DB: {}", status_str, e))?;
+            .map_err(|e| DbError::DataCorruption(
+                format!("Unknown invoice status '{}' from DB: {}", status_str, e)))?;
 
         let amount_str: String = row.get("amount_raw");
         let paid_str: String = row.get("paid_raw");
 
         let amount_raw = U256::from_str(&amount_str)
-            .map_err(|e| anyhow::anyhow!("Failed to parse amount_raw: {}", e))?;
+            .map_err(|e| DbError::DataCorruption(
+                format!("Failed to parse amount_raw from '{}': {}", amount_str, e)))?;
         let paid_raw = U256::from_str(&paid_str)
-            .map_err(|e| anyhow::anyhow!("Failed to parse paid_raw: {}", e))?;
+            .map_err(|e| DbError::DataCorruption(
+                format!("Failed to parse paid_raw from '{}': {}", paid_str, e)))?;
 
         let network: String = row.get("network");
         let token: String = row.get("token");
 
         let decimals = row.get::<i16, _>("decimals") as u8;
 
-        let amount_human = format_units(amount_raw, decimals)?;
-        let paid_human = format_units(paid_raw, decimals)?;
+        let amount_human = format_units(amount_raw, decimals)
+            .map_err(|e| DbError::DataCorruption(
+                format!("format_units for '{}' ({} decimals) failed: {}", amount_raw, decimals, e)))?;
+        let paid_human = format_units(paid_raw, decimals)
+            .map_err(|e| DbError::DataCorruption(
+                format!("format_units for '{}' ({} decimals) failed: {}", paid_raw, decimals, e)))?;
 
         Ok(Invoice {
             id: row.get::<Uuid, _>("id"),
@@ -133,14 +142,16 @@ impl PostgresAdapter {
 
     pub(super) fn map_row_to_payment(
         row: PgRow
-    ) -> anyhow::Result<Payment> {
+    ) -> DbResult<Payment> {
         let status_str: String = row.get("status");
         let status: PaymentStatus = status_str.parse()
-            .map_err(|e| anyhow::anyhow!("Unknown payment status '{}' from DB: {}", status_str, e))?;
+            .map_err(|e| DbError::DataCorruption(
+                format!("Unknown payment status '{}' from DB: {}", status_str, e)))?;
 
         let amount_str: String = row.get("amount_raw");
         let amount_raw = U256::from_str(&amount_str)
-            .map_err(|e| anyhow::anyhow!("Failed to parse amount_raw: {}", e))?;
+            .map_err(|e| DbError::DataCorruption(
+                format!("Failed to parse amount_raw from '{}': {}", amount_str, e)))?;
 
         Ok(Payment {
             id: row.get::<Uuid, _>("id"),
@@ -160,15 +171,17 @@ impl PostgresAdapter {
 
     pub(super) fn map_row_to_webhook(
         row: PgRow
-    ) -> anyhow::Result<Webhook> {
+    ) -> DbResult<Webhook> {
         let status_str: String = row.get("status");
         let status: WebhookStatus = status_str.parse()
-            .map_err(|e| anyhow::anyhow!("Unknown webhook status '{}' from DB: {}", status_str, e))?;
+            .map_err(|e| DbError::DataCorruption(
+                format!("Unknown webhook status '{}' from DB: {}", status_str, e)))?;
 
         let db_payload: Value = row.get("payload");
 
         let payload_enum: WebhookEvent = serde_json::from_value(db_payload)
-            .map_err(|e| anyhow::anyhow!("Failed to deserialize webhook payload: {}", e))?;
+            .map_err(|e| DbError::DataCorruption(
+                format!("Failed to deserialize webhook payload: {}", e)))?;
 
         Ok(Webhook {
             id: row.get::<Uuid, _>("id"),

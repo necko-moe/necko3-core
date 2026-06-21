@@ -10,17 +10,22 @@ use tokio::sync::mpsc;
 use tokio::task::AbortHandle;
 use tracing::warn;
 use uuid::Uuid;
+use necko3_blockchain::error::BoxedError;
 use necko3_blockchain::traits::adapter::BlockchainAdapter;
 use necko3_database::backends::in_memory::InMemoryAdapter;
+use necko3_database::error::DbResult;
+use necko3_database::traits::chain::DbChainId;
+use necko3_database::traits::token::DbTokenId;
 use necko3_types::{Invoice, InvoiceStatus};
 use crate::builder::chain_config::ChainConfig;
 use crate::builder::invoice_config::{ExpirationTime, PaymentAddress, PaymentAmount, PaymentAsset, PaymentSpec, WebhookConfig};
+use crate::builder::invoice_config::error::InvoiceCreationError;
 use crate::builder::NeckoCoreBuilder;
 use crate::builder::token_config::TokenConfig;
 use crate::types::NeckoEvent;
 
 pub struct Worker {
-    pub adapter: Box<dyn BlockchainAdapter>,
+    pub adapter: Box<dyn BlockchainAdapter<Error = BoxedError>>,
     pub abort_handle: AbortHandle,
     pub state_tx: mpsc::Sender<StateCommand>,
     pub transaction_tx: mpsc::Sender<TrackTransaction>,
@@ -117,18 +122,18 @@ where
         self.db.clone()
     }
 
-    pub async fn add_chain(&self, chain_config: ChainConfig) -> anyhow::Result<()> {
+    pub async fn add_chain(&self, chain_config: ChainConfig) -> DbResult<DbChainId> {
         let (tokens, chain_data) = chain_config.into();
-        self.db.add_chain(&chain_data).await?;
+        let id = self.db.add_chain(&chain_data).await?;
 
         for token in tokens {
             self.db.add_token(&chain_data.name, &token).await?;
         }
 
-        Ok(())
+        Ok(id)
     }
 
-    pub async fn add_token(&self, chain_name: impl Into<String>, token: TokenConfig) -> anyhow::Result<()> {
+    pub async fn add_token(&self, chain_name: impl Into<String>, token: TokenConfig) -> DbResult<DbTokenId> {
         let token = token.into();
         self.db.add_token(&chain_name.into(), &token).await
     }
@@ -139,7 +144,7 @@ where
         payment_address: PaymentAddress,
         webhook_config: Option<WebhookConfig>,
         expiration_time: ExpirationTime,
-    ) -> anyhow::Result<Invoice> {
+    ) -> Result<Invoice, InvoiceCreationError> {
         let now = Utc::now();
 
         let expires_at = match expiration_time {
@@ -148,29 +153,22 @@ where
         };
 
         if expires_at < now {
-            anyhow::bail!("The expiration time has already passed")
+            return Err(InvoiceCreationError::Validation("The expiration time has already passed".into()));
         }
 
         let (symbol, decimals) = match payment_spec.asset {
             PaymentAsset::Native => {
-                let chain = match self.db.get_chain(&payment_spec.network).await {
-                    Ok(Some(chain)) => chain,
-                    Ok(None) => anyhow::bail!("Unknown network: {}", payment_spec.network),
-                    Err(e) => {
-                        anyhow::bail!("Failed to get chain: {}", e);
-                    }
-                };
+                let chain = self.db.get_chain(&payment_spec.network).await?
+                    .ok_or_else(|| InvoiceCreationError::NetworkNotFound(payment_spec.network.clone()))?;
 
                 (chain.native_symbol, chain.decimals)
             }
             PaymentAsset::Token(symbol) => {
-                let decimals = match self.db.get_token_decimals(&payment_spec.network, &symbol).await {
-                    Ok(Some(decimals)) => decimals,
-                    Ok(None) => anyhow::bail!("Unknown token symbol {} on network: {}", symbol, payment_spec.network),
-                    Err(e) => {
-                        anyhow::bail!("Failed to get token decimals: {}", e)
-                    }
-                };
+                let decimals = self.db.get_token_decimals(&payment_spec.network, &symbol).await?
+                    .ok_or_else(|| InvoiceCreationError::TokenNotFound {
+                        symbol: symbol.clone(),
+                        network: payment_spec.network.clone()
+                    })?;
 
                 (symbol, decimals)
             }
@@ -178,90 +176,48 @@ where
 
         let (amount_human, amount_raw) = match payment_spec.amount {
             PaymentAmount::Raw(raw_amount) => {
-                let amount_human = match format_units(raw_amount, decimals) {
-                    Ok(amt) => amt,
-                    Err(e) => {
-                        anyhow::bail!("Failed to format payment amount: {}", e);
-                    }
-                };
-
+                let amount_human = format_units(raw_amount, decimals)?;
                 (amount_human, raw_amount)
             },
             PaymentAmount::Human(amount_str) => {
-                let amount_raw = match parse_units(&amount_str, decimals) {
-                    Ok(amt) => amt,
-                    Err(e) => {
-                        anyhow::bail!("Failed to parse payment amount: {}", e)
-                    }
-                };
-
+                let amount_raw = parse_units(&amount_str, decimals)?;
                 (amount_str, amount_raw.into())
             }
         };
 
         if amount_raw == 0 {
-            anyhow::bail!("Payment amount is zero")
+            return Err(InvoiceCreationError::Validation("Payment amount is zero".into()));
         }
 
         let (address, address_index) = match payment_address {
             PaymentAddress::UseExisting(addr) => (addr, 0),
             PaymentAddress::GenerateNew => {
-                let xpub = match self.db.get_xpub(&payment_spec.network).await {
-                    Ok(Some(xpub)) => xpub,
-                    Ok(None) => anyhow::bail!("Unknown network: {}", payment_spec.network),
-                    Err(e) => {
-                        anyhow::bail!("Failed to get xpub: {}", e);
-                    },
-                };
+                let xpub = self.db.get_xpub(&payment_spec.network).await?
+                    .ok_or_else(|| InvoiceCreationError::MissingXpub(payment_spec.network.clone()))?;
 
-                let index = match self.db.next_derivation_index(&xpub).await {
-                    Ok(index) => index,
-                    Err(e) => {
-                        anyhow::bail!("Failed to get next derivation index: {}", e)
-                    },
-                };
+                let index = self.db.next_derivation_index(&xpub).await?;
 
-                let address_res = match self.workers.get(&payment_spec.network) {
-                    Some(worker) => worker.adapter.derive_address(xpub, index as u32),
-                    None => {
-                        anyhow::bail!("Worker for chain '{}' is not initialized", payment_spec.network)
-                    },
-                };
+                let worker = self.workers.get(&payment_spec.network)
+                    .ok_or_else(|| InvoiceCreationError::WorkerNotInitialized(payment_spec.network.clone()))?;
 
-                let address = match address_res {
-                    Ok(address) => address,
-                    Err(e) => {
-                        anyhow::bail!("Failed to derive address: {}", e);
-                    },
-                };
+                let address = worker.adapter.derive_address(xpub, index as u32)
+                    .map_err(|e| InvoiceCreationError::Adapter(e.to_string()))?;
 
                 (address, index as u32)
             }
             PaymentAddress::WithXpub { xpub, derivation_index } => {
-                let address_res = match self.workers.get(&payment_spec.network) {
-                    Some(worker) => worker.adapter.derive_address(xpub, derivation_index),
-                    None => {
-                        anyhow::bail!("Worker for chain '{}' is not initialized", payment_spec.network)
-                    },
-                };
+                let worker = self.workers.get(&payment_spec.network)
+                    .ok_or_else(|| InvoiceCreationError::WorkerNotInitialized(payment_spec.network.clone()))?;
 
-                let address = match address_res {
-                    Ok(address) => address,
-                    Err(e) => {
-                        anyhow::bail!("Failed to derive address: {}", e);
-                    },
-                };
+                let address = worker.adapter.derive_address(xpub, derivation_index)
+                    .map_err(|e| InvoiceCreationError::Adapter(e.to_string()))?;
 
                 (address, derivation_index)
             }
         };
 
         let (webhook_url, webhook_secret, webhook_max_retries) = match webhook_config {
-            Some(webhook_config) => {
-                (Some(webhook_config.url),
-                 Some(webhook_config.secret),
-                 Some(webhook_config.max_retries))
-            }
+            Some(cfg) => (Some(cfg.url), Some(cfg.secret), Some(cfg.max_retries)),
             None => (None, None, None)
         };
 
@@ -284,9 +240,7 @@ where
             status: InvoiceStatus::Pending,
         };
 
-        if let Err(e) = self.db.add_invoice(&invoice).await {
-            anyhow::bail!("Failed to insert invoice: {}", e);
-        }
+        self.db.add_invoice(&invoice).await?;
 
         Ok(invoice)
     }

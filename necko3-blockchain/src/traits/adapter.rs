@@ -6,7 +6,9 @@ use std::collections::{HashMap, HashSet};
 use tokio::sync::mpsc;
 
 pub trait BlockchainAdapter: Send + Sync {
-    fn derive_address(&self, xpub: String, index: u32) -> anyhow::Result<String>;
+    type Error: std::error::Error + Send + Sync + 'static;
+
+    fn derive_address(&self, xpub: String, index: u32) -> Result<String, Self::Error>;
 
     fn build_worker(
         state: ChainState,
@@ -17,7 +19,7 @@ pub trait BlockchainAdapter: Send + Sync {
         state_rx: mpsc::Receiver<StateCommand>,
         transactions_rx: mpsc::Receiver<TrackTransaction>,
         event_tx: mpsc::Sender<ChainEvent>
-    ) -> anyhow::Result<impl BlockchainWorker>
+    ) -> Result<impl BlockchainWorker, Self::Error>
     where
         Self: Sized;
 }

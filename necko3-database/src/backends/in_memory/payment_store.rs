@@ -2,12 +2,13 @@ use async_trait::async_trait;
 use uuid::Uuid;
 use necko3_types::{Payment, PaymentStatus, UpsertPayment};
 use crate::backends::in_memory::InMemoryAdapter;
+use crate::error::{DbError, DbResult};
 use crate::model::{PaginatedVec, PaymentFilter};
 use crate::traits::PaymentStore;
 
 #[async_trait]
 impl PaymentStore for InMemoryAdapter {
-    async fn get_payments(&self, filter: PaymentFilter) -> anyhow::Result<PaginatedVec<Payment>> {
+    async fn get_payments(&self, filter: PaymentFilter) -> DbResult<PaginatedVec<Payment>> {
         let mut filtered: Vec<Payment> = self.payments.iter()
             .filter(|kv| {
                 let pay = kv.value();
@@ -41,19 +42,19 @@ impl PaymentStore for InMemoryAdapter {
         ))
     }
 
-    async fn get_payment(&self, payment_id: Uuid) -> anyhow::Result<Option<Payment>> {
+    async fn get_payment(&self, payment_id: Uuid) -> DbResult<Option<Payment>> {
         Ok(self.payments.get(&payment_id)
             .map(|x| x.value().clone()))
     }
 
-    async fn get_payment_by_tx_hash(&self, tx_hash: String) -> anyhow::Result<Option<Payment>> {
+    async fn get_payment_by_tx_hash(&self, tx_hash: String) -> DbResult<Option<Payment>> {
         Ok(self.payments.iter()
             .find(|payment|
                 payment.value().tx_hash == tx_hash)
             .map(|x| x.value().clone()))
     }
 
-    async fn get_payments_by_status(&self, status: PaymentStatus) -> anyhow::Result<Vec<Payment>> {
+    async fn get_payments_by_status(&self, status: PaymentStatus) -> DbResult<Vec<Payment>> {
         Ok(self.payments.iter()
             .filter(|payment|
                 payment.value().status == status)
@@ -61,7 +62,7 @@ impl PaymentStore for InMemoryAdapter {
             .collect())
     }
 
-    async fn upsert_payment(&self, upsert: &UpsertPayment) -> anyhow::Result<(Uuid, bool)> {
+    async fn upsert_payment(&self, upsert: &UpsertPayment) -> DbResult<(Uuid, bool)> {
         if let Some(mut existing) = self.payments.iter_mut()
             .find(|x| {
                 let pay = x.value();
@@ -85,20 +86,34 @@ impl PaymentStore for InMemoryAdapter {
         Ok((payment_id, true))
     }
 
-    async fn update_payment_status(&self, payment_id: Uuid, status: PaymentStatus) -> anyhow::Result<()> {
+    async fn update_payment_status(&self, payment_id: Uuid, status: PaymentStatus) -> DbResult<()> {
+        if !self.payments.contains_key(&payment_id) {
+            return Err(DbError::NotFound {
+                entity: "Payment",
+                id: payment_id.to_string(),
+            })
+        }
+        
         if let Some(mut payment) = self.payments
-            .get_mut(&payment_id)
-        {
+            .get_mut(&payment_id) {
+            
             payment.status = status;
         }
 
         Ok(())
     }
 
-    async fn update_payment_block(&self, payment_id: Uuid, block_num: u64, block_hash: String) -> anyhow::Result<()> {
+    async fn update_payment_block(&self, payment_id: Uuid, block_num: u64, block_hash: String) -> DbResult<()> {
+        if !self.payments.contains_key(&payment_id) {
+            return Err(DbError::NotFound {
+                entity: "Payment",
+                id: payment_id.to_string(),
+            })
+        }
+        
         if let Some(mut payment) = self.payments
-            .get_mut(&payment_id)
-        {
+            .get_mut(&payment_id) {
+            
             payment.block_number = block_num;
             payment.block_hash = block_hash;
         }

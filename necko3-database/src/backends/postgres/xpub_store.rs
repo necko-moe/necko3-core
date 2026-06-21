@@ -1,10 +1,11 @@
 use async_trait::async_trait;
 use crate::backends::postgres::PostgresAdapter;
+use crate::error::DbResult;
 use crate::traits::XPubStore;
 
 #[async_trait]
 impl XPubStore for PostgresAdapter {
-    async fn next_derivation_index(&self, xpub: &str) -> anyhow::Result<u64> {
+    async fn next_derivation_index(&self, xpub: &str) -> DbResult<u64> {
         let index: i64 = sqlx::query_scalar(
             r#"INSERT INTO xpub_states (xpub, last_used_index)
                    VALUES ($1, 0)

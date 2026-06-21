@@ -7,9 +7,9 @@ use std::sync::Arc;
 use std::time::Duration;
 use dashmap::DashMap;
 use tokio::sync::{mpsc, oneshot};
-use tracing::error;
 use necko3_database::backends::in_memory::InMemoryAdapter;
 use necko3_database::decorators::notifying::NotifyingDb;
+use necko3_database::error::DbResult;
 use necko3_database::traits::{ChainStore, DatabaseExt, TokenStore};
 use crate::builder::chain_config::ChainConfig;
 use crate::builder::webhook_config::WebhookDispatcherConfig;
@@ -48,19 +48,16 @@ where
     E: Clone + Send + Sync + 'static,
     NeckoEvent: TryInto<E>,
 {
-    pub async fn add_chain(self, chain_config: ChainConfig) -> Self {
+    pub async fn add_chain(self, chain_config: ChainConfig) -> DbResult<Self> {
         let (tokens, chain_data) = chain_config.into();
-        if let Err(e) = self.db.add_chain(&chain_data).await {
-            error!(error = %e, "Failed to add chain");
-        }
+
+        self.db.add_chain(&chain_data).await?;
 
         for token in tokens {
-            if let Err(e) = self.db.add_token(&chain_data.name, &token).await {
-                error!(error = %e, chain_name = chain_data.name, "Failed to add token");
-            }
+            self.db.add_token(&chain_data.name, &token).await?;
         }
 
-        self
+        Ok(self)
     }
 }
 

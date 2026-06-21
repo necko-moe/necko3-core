@@ -1,11 +1,12 @@
 use std::sync::atomic::{AtomicU64, Ordering};
 use async_trait::async_trait;
 use crate::backends::in_memory::InMemoryAdapter;
+use crate::error::DbResult;
 use crate::traits::XPubStore;
 
 #[async_trait]
 impl XPubStore for InMemoryAdapter {
-    async fn next_derivation_index(&self, xpub: &str) -> anyhow::Result<u64> {
+    async fn next_derivation_index(&self, xpub: &str) -> DbResult<u64> {
         if let Some(last_used_index) = self.xpub_states.get(xpub) {
             return Ok(last_used_index.value()
                 .fetch_add(1, Ordering::SeqCst))

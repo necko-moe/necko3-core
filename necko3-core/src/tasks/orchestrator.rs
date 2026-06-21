@@ -4,6 +4,7 @@ pub mod chain_events;
 use necko3_blockchain::traits::worker::BlockchainWorker;
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::time::Duration;
 use dashmap::DashMap;
 use tokio::sync::mpsc;
 use tracing::{debug, error, warn};
@@ -47,10 +48,15 @@ impl<D> NeckoOrchestrator<D> {
 
 impl<D: DatabaseExt> NeckoOrchestrator<D> {
     pub async fn run(mut self, ready_tx: tokio::sync::oneshot::Sender<()>) {
-        let chains = self.db.get_chains().await.unwrap_or_else(|e| {
-            warn!(error = %e, "Failed to initialize workers (get_chains)");
-            vec![]
-        });
+        let chains = loop {
+            match self.db.get_chains().await {
+                Ok(c) => break c,
+                Err(e) => {
+                    error!(error = %e, "Failed to get chains from DB. Retrying in 5s...");
+                    tokio::time::sleep(Duration::from_secs(5)).await;
+                }
+            }
+        };
 
         for chain in chains {
             self.init_chain(chain).await;
@@ -92,11 +98,16 @@ impl<D: DatabaseExt> NeckoOrchestrator<D> {
 
         let mut tokens_map = HashMap::new();
 
-        let tokens = self.db.get_tokens(&chain_data.name).await.unwrap_or_else(|e| {
-            warn!(error = %e, chain_name = chain_data.name,
-                    "Failed to get tokens for the chain");
-            vec![]
-        });
+        let tokens = loop {
+            match self.db.get_tokens(&chain_data.name).await {
+                Ok(t) => break t,
+                Err(e) => {
+                    error!(error = %e, chain_name = chain_data.name,
+                           "Failed to get tokens for the chain. Retrying in 2s...");
+                    tokio::time::sleep(Duration::from_secs(2)).await;
+                }
+            }
+        };
         for token in tokens {
             tokens_map.insert(token.contract.clone(), token);
         }
@@ -106,10 +117,10 @@ impl<D: DatabaseExt> NeckoOrchestrator<D> {
         let (state_tx, state_rx) = mpsc::channel(1000);
         let (transaction_tx, transaction_rx) = mpsc::channel(1000);
 
-        let worker_result = match chain_data.chain_type {
-            ChainType::EVM => EvmBlockchain::build_worker(
+        let (adapter, worker_result) = match chain_data.chain_type {
+            ChainType::EVM => (EvmBlockchain, EvmBlockchain::build_worker(
                 state, tokens_map, watch_addresses, latest_blocks,
-                state_rx, transaction_rx, self.chain_event_tx.clone()),
+                state_rx, transaction_rx, self.chain_event_tx.clone())),
         };
         let abort_handle = match worker_result {
             Ok(worker) => tokio::spawn(worker.run()).abort_handle(),
@@ -122,7 +133,7 @@ impl<D: DatabaseExt> NeckoOrchestrator<D> {
         };
 
         let worker = Worker {
-            adapter: Box::new(EvmBlockchain),
+            adapter: Box::new(adapter),
             abort_handle,
             state_tx,
             transaction_tx,

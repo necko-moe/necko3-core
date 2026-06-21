@@ -16,6 +16,7 @@ use parking_lot::RwLock;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicI32, AtomicU64};
 use uuid::Uuid;
+use crate::error::DbResult;
 
 #[derive(Default)]
 pub struct InMemoryAdapter {
@@ -35,7 +36,7 @@ pub struct InMemoryAdapter {
 
 #[async_trait]
 impl DatabaseAdapter for InMemoryAdapter {
-    async fn new(_database_url: &str, _max_connections: u32) -> anyhow::Result<Self>
+    async fn new(_database_url: &str, _max_connections: u32) -> DbResult<Self>
     where
         Self: Sized
     {

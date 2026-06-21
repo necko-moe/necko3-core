@@ -5,11 +5,12 @@ use async_trait::async_trait;
 use chrono::Utc;
 use std::collections::HashSet;
 use uuid::Uuid;
+use crate::error::{DbError, DbExtError, DbExtResult, DbResult};
 
 #[async_trait]
 pub trait DatabaseExt: DatabaseStore {
     // chain
-    async fn get_chains_with_token(&self, token_symbol: &str) -> anyhow::Result<Vec<ChainData>> {
+    async fn get_chains_with_token(&self, token_symbol: &str) -> DbResult<Vec<ChainData>> {
         let chains = self.get_chains().await?;
         let tokens = self.get_tokens_with_symbol(token_symbol).await?;
 
@@ -26,38 +27,38 @@ pub trait DatabaseExt: DatabaseStore {
         Ok(result)
     }
 
-    async fn get_latest_block(&self, chain_name: &str) -> anyhow::Result<Option<u64>> {
+    async fn get_latest_block(&self, chain_name: &str) -> DbResult<Option<u64>> {
         Ok(self.get_chain(chain_name).await?
             .map(|c| c.last_processed_block))
     }
 
-    async fn get_xpub(&self, chain_name: &str) -> anyhow::Result<Option<String>> {
+    async fn get_xpub(&self, chain_name: &str) -> DbResult<Option<String>> {
         Ok(self.get_chain(chain_name).await?
             .map(|c| c.xpub))
     }
 
-    async fn get_rpc_urls(&self, chain_name: &str) -> anyhow::Result<Option<Vec<String>>> {
+    async fn get_rpc_urls(&self, chain_name: &str) -> DbResult<Option<Vec<String>>> {
         Ok(self.get_chain(chain_name).await?
             .map(|c| c.rpc_urls))
     }
 
-    async fn get_block_lag(&self, chain_name: &str) -> anyhow::Result<Option<u8>> {
+    async fn get_block_lag(&self, chain_name: &str) -> DbResult<Option<u8>> {
         Ok(self.get_chain(chain_name).await?
             .map(|c| c.block_lag))
     }
 
-    async fn get_required_confirmations(&self, chain_name: &str) -> anyhow::Result<Option<u64>> {
+    async fn get_required_confirmations(&self, chain_name: &str) -> DbResult<Option<u64>> {
         Ok(self.get_chain(chain_name).await?
             .map(|c| c.required_confirmations))
     }
 
-    async fn get_watch_addresses(&self, chain_name: &str) -> anyhow::Result<Option<HashSet<String>>> {
+    async fn get_watch_addresses(&self, chain_name: &str) -> DbResult<Option<HashSet<String>>> {
         Ok(self.get_chain(chain_name).await?
             .map(|c| c.watch_addresses))
     }
 
     // token
-    async fn get_token_contracts(&self, chain_name: &str) -> anyhow::Result<Vec<String>> {
+    async fn get_token_contracts(&self, chain_name: &str) -> DbResult<Vec<String>> {
         let tokens = self.get_tokens(chain_name).await?;
 
         Ok(tokens.into_iter()
@@ -65,20 +66,40 @@ pub trait DatabaseExt: DatabaseStore {
             .collect())
     }
 
-    // invoice
-    async fn cancel_invoice(&self, uuid: Uuid) -> anyhow::Result<()> {
-        self.update_invoice_status(uuid, InvoiceStatus::Cancelled).await
+    async fn get_token_decimals(&self, chain_name: &str, token_symbol: &str) -> DbResult<Option<u8>> {
+        Ok(self.get_token(chain_name, token_symbol).await?
+            .map(|c| c.decimals))
+    }
+    
+    async fn get_symbol_decimals(&self, chain_name: &str, symbol: &str) -> DbResult<Option<u8>> {
+        if let Some(chain) = self.get_chain(chain_name).await?
+            && chain.native_symbol == symbol {
+            return Ok(Some(chain.decimals));
+        }
+
+        let decimals = self.get_token_decimals(chain_name, symbol).await?;
+
+        Ok(decimals)
     }
 
-    async fn get_invoice_status(&self, uuid: Uuid) -> anyhow::Result<Option<InvoiceStatus>> {
+    // invoice
+    async fn cancel_invoice(&self, uuid: Uuid) -> DbResult<()> {
+        self.update_invoice_status(uuid, InvoiceStatus::Cancelled).await?;
+        Ok(())
+    }
+
+    async fn get_invoice_status(&self, uuid: Uuid) -> DbResult<Option<InvoiceStatus>> {
         Ok(self.get_invoice(uuid).await?
             .map(|i| i.status))
     }
 
     // payment
-    async fn finalize_payment(&self, payment_id: Uuid) -> anyhow::Result<Option<FinalizedPaymentInfo>> {
+    async fn finalize_payment(&self, payment_id: Uuid) -> DbExtResult<Option<FinalizedPaymentInfo>> {
         let payment = self.get_payment(payment_id).await?
-            .ok_or_else(|| anyhow::anyhow!("Payment {} not found", payment_id))?;
+            .ok_or_else(|| DbError::NotFound {
+                entity: "Payment",
+                id: payment_id.to_string(),
+            })?;
 
         self.update_payment_status(payment_id, PaymentStatus::Confirmed).await?;
 
@@ -86,10 +107,13 @@ pub trait DatabaseExt: DatabaseStore {
 
         if let Some(invoice) = invoice {
             if invoice.network != payment.network || invoice.token != payment.token {
-                anyhow::bail!(
-                    "Asset mismatch for invoice {}: expected {} ({}), got {} ({})",
-                    invoice.id, invoice.token, invoice.network, payment.token, payment.network
-                );
+                return Err(DbExtError::AssetMismatch {
+                    invoice_id: invoice.id,
+                    expected_token: invoice.token,
+                    expected_network: invoice.network,
+                    got_token: payment.token,
+                    got_network: payment.network,
+                });
             }
 
             let old_status = invoice.status;
@@ -114,7 +138,7 @@ pub trait DatabaseExt: DatabaseStore {
         } else { Ok(None) }
     }
 
-    async fn mark_txs_as_pending(&self, tx_hashes: &[String]) -> anyhow::Result<Vec<String>> {
+    async fn mark_txs_as_pending(&self, tx_hashes: &[String]) -> DbResult<Vec<String>> {
         let mut skipped = Vec::new();
 
         for tx_hash in tx_hashes {
@@ -132,14 +156,18 @@ pub trait DatabaseExt: DatabaseStore {
         Ok(skipped)
     }
     
-    async fn cancel_payment(&self, payment_id: Uuid) -> anyhow::Result<()> {
-        self.update_payment_status(payment_id, PaymentStatus::Cancelled).await
+    async fn cancel_payment(&self, payment_id: Uuid) -> DbResult<()> {
+        self.update_payment_status(payment_id, PaymentStatus::Cancelled).await?;
+        Ok(())
     }
 
     // webhook
-    async fn create_webhook_job(&self, invoice_id: Uuid, event: &WebhookEvent) -> anyhow::Result<()> {
+    async fn create_webhook_job(&self, invoice_id: Uuid, event: &WebhookEvent) -> DbResult<()> {
         let invoice = self.get_invoice(invoice_id).await?
-            .ok_or_else(|| anyhow::anyhow!("Invoice {} not found", invoice_id))?;
+            .ok_or_else(|| DbError::NotFound {
+                entity: "Invoice",
+                id: invoice_id.to_string(),
+            })?;
 
         let url = match invoice.webhook_url {
             Some(u) => u,
@@ -159,10 +187,12 @@ pub trait DatabaseExt: DatabaseStore {
             created_at: now,
         };
 
-        self.add_webhook(&webhook).await
+        self.add_webhook(&webhook).await?;
+        Ok(())
     }
 
-    async fn cancel_webhook(&self, webhook_id: Uuid) -> anyhow::Result<()> {
-        self.update_webhook_status(webhook_id, WebhookStatus::Cancelled).await
+    async fn cancel_webhook(&self, webhook_id: Uuid) -> DbResult<()> {
+        self.update_webhook_status(webhook_id, WebhookStatus::Cancelled).await?;
+        Ok(())
     }
 }

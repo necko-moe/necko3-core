@@ -3,11 +3,12 @@ use alloy_primitives::BlockNumber;
 use async_trait::async_trait;
 use sqlx::QueryBuilder;
 use crate::backends::postgres::PostgresAdapter;
+use crate::error::DbResult;
 use crate::traits::IndexedBlocksStore;
 
 #[async_trait]
 impl IndexedBlocksStore for PostgresAdapter {
-    async fn get_latest_indexed_blocks(&self, chain_id: i32, limit: u16) -> anyhow::Result<HashMap<BlockNumber, String>> {
+    async fn get_latest_indexed_blocks(&self, chain_id: i32, limit: u16) -> DbResult<HashMap<BlockNumber, String>> {
         let blocks_db = sqlx::query_as::<_, (i64, String)>(
             r#"SELECT block_number, block_hash
                    FROM indexed_blocks
@@ -28,7 +29,7 @@ impl IndexedBlocksStore for PostgresAdapter {
         Ok(blocks)
     }
 
-    async fn upsert_indexed_block(&self, chain_id: i32, block_number: u64, block_hash: String) -> anyhow::Result<()> {
+    async fn upsert_indexed_block(&self, chain_id: i32, block_number: u64, block_hash: String) -> DbResult<()> {
         sqlx::query(
             r#"INSERT INTO indexed_blocks (chain_id, block_number, block_hash)
                    VALUES ($1, $2, $3)
@@ -44,7 +45,7 @@ impl IndexedBlocksStore for PostgresAdapter {
         Ok(())
     }
 
-    async fn upsert_indexed_blocks_batch(&self, chain_id: i32, blocks: &[(BlockNumber, String)]) -> anyhow::Result<()> {
+    async fn upsert_indexed_blocks_batch(&self, chain_id: i32, blocks: &[(BlockNumber, String)]) -> DbResult<()> {
         if blocks.is_empty() {
             return Ok(());
         }

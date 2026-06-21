@@ -1,4 +1,5 @@
 pub mod fallback_provider;
+pub mod error;
 
 use std::cmp::min;
 use std::collections::{HashMap, HashSet};
@@ -25,6 +26,10 @@ use crate::backends::evm::fallback_provider::create_fallback_provider;
 use crate::traits::adapter::BlockchainAdapter;
 use crate::traits::worker::BlockchainWorker;
 
+pub use error::ProviderError;
+use crate::backends::evm::error::EvmAdapterError;
+use crate::error::BoxedError;
+
 pub const MAX_REORG_DEPTH: u64 = 100;
 
 sol! {
@@ -34,9 +39,8 @@ sol! {
 
 pub struct EvmBlockchain;
 
-impl BlockchainAdapter for EvmBlockchain {
-    #[instrument(skip(self), level = "debug")]
-    fn derive_address(&self, xpub: String, index: u32) -> anyhow::Result<String> {
+impl EvmBlockchain {
+    fn derive_address_inner(&self, xpub: String, index: u32) -> Result<String, EvmAdapterError> {
         trace!("Deriving address for index {}", index);
 
         let xpub = XPub::from_str(&xpub)?;
@@ -48,7 +52,7 @@ impl BlockchainAdapter for EvmBlockchain {
         Ok(addr)
     }
 
-    fn build_worker(
+    fn build_worker_inner(
         state: ChainState,
         tokens_map: HashMap<String, TokenData>,
         watch_addresses: HashSet<String>,
@@ -57,9 +61,12 @@ impl BlockchainAdapter for EvmBlockchain {
         state_rx: mpsc::Receiver<StateCommand>,
         transactions_rx: mpsc::Receiver<TrackTransaction>,
         event_tx: mpsc::Sender<ChainEvent>
-    ) -> anyhow::Result<impl BlockchainWorker> {
+    ) -> Result<impl BlockchainWorker, EvmAdapterError> {
         let worker_watch_addresses = watch_addresses.iter()
-            .map(|s| s.parse::<Address>())
+            .map(|s| s.parse::<Address>().map_err(|e| EvmAdapterError::AddressParse {
+                address: s.clone(),
+                source: e,
+            }))
             .collect::<Result<HashSet<_>, _>>()?;
 
         let mut worker_tokens_map = HashMap::with_capacity(tokens_map.len());
@@ -70,14 +77,39 @@ impl BlockchainAdapter for EvmBlockchain {
                     worker_tokens_map.insert(addr, v.clone());
                 }
                 Err(e) => {
-                    warn!(contract_address = k, error = %e,
-                        "Failed to parse token contract_address as Address");
+                    return Err(EvmAdapterError::AddressParse {
+                        address: k.clone(),
+                        source: e,
+                    })
                 }
             }
         }
 
         EvmBlockchainWorker::new(state, worker_tokens_map, worker_watch_addresses, block_hashes,
                                  state_rx, transactions_rx, event_tx)
+    }
+}
+
+impl BlockchainAdapter for EvmBlockchain {
+    type Error = BoxedError;
+
+    #[instrument(skip(self), level = "debug")]
+    fn derive_address(&self, xpub: String, index: u32) -> Result<String, Self::Error> {
+        Ok(self.derive_address_inner(xpub, index)?)
+    }
+
+    fn build_worker(
+        state: ChainState,
+        tokens_map: HashMap<String, TokenData>,
+        watch_addresses: HashSet<String>,
+        block_hashes: HashMap<BlockNumber, String>,
+
+        state_rx: mpsc::Receiver<StateCommand>,
+        transactions_rx: mpsc::Receiver<TrackTransaction>,
+        event_tx: mpsc::Sender<ChainEvent>
+    ) -> Result<impl BlockchainWorker, Self::Error> {
+        Ok(EvmBlockchain::build_worker_inner(state, tokens_map, watch_addresses, block_hashes,
+                                             state_rx, transactions_rx, event_tx)?)
     }
 }
 
@@ -118,13 +150,8 @@ impl EvmBlockchainWorker {
         state_rx: mpsc::Receiver<StateCommand>,
         transactions_rx: mpsc::Receiver<TrackTransaction>,
         event_tx: mpsc::Sender<ChainEvent>
-    ) -> anyhow::Result<Self> {
-        let provider = match create_fallback_provider(&state.dynamic_data.rpc_urls) {
-            Ok(p) => p,
-            Err(e) => {
-                anyhow::bail!("Failed to create fallback provider. Error: {:?}", e)
-            }
-        };
+    ) -> Result<Self, EvmAdapterError> {
+        let provider = create_fallback_provider(&state.dynamic_data.rpc_urls)?;
 
         Ok(Self {
             provider,
@@ -334,42 +361,25 @@ impl EvmBlockchainWorker {
         let range_to = min(rpc_block_with_lag, self.latest_block_num + 5);
 
         for block_num in (self.latest_block_num + 1)..=range_to {
-            let block_opt = match self.process_block(block_num).await
-            {
-                Ok(b) => Some(b),
-                Err(e) => {
-                    error!(error = %e, block_number = block_num,
-                        "Failed to process block (very bad)");
+            let (block_hash, parent_hash) = self.process_block(block_num).await;
 
-                    None
-                }
-            };
+            self.block_hashes.insert(block_num, block_hash.to_string());
 
-            if let Some((block_hash, parent_hash)) = block_opt {
-                self.block_hashes.insert(block_num, block_hash.to_string());
+            self.process_blocks_reorg(block_num, parent_hash).await;
+            self.process_tracked_transactions(block_num).await;
 
-                self.process_blocks_reorg(block_num, parent_hash).await;
-                self.process_tracked_transactions(block_num).await;
+            let actual_lag = current_rpc_block_num - block_num;
 
-                let actual_lag = current_rpc_block_num - block_num;
+            self.process_logs(block_hash, actual_lag).await;
 
-                if let Err(e) = self.process_logs(block_hash, actual_lag).await {
-                    error!(error = %e, block_number = block_num, block_hash = %block_hash,
-                        "Failed to process logs for block");
-                }
-
-                if let Err(e) = self.event_tx.send(ChainEvent::BlockProcessed {
-                    chain_id: self.state.static_data.id,
-                    chain_name: self.state.static_data.name.clone(),
-                    block_number: block_num,
-                    block_hash: block_hash.to_string(),
-                }).await {
-                    warn!(error = %e, block_number = block_num,
-                        "Failed to send BlockProcessed event");
-                }
-            } else {
-                warn!(block_number = block_num,
-                    "Skipping logs because process_block returned error instead of transactions");
+            if let Err(e) = self.event_tx.send(ChainEvent::BlockProcessed {
+                chain_id: self.state.static_data.id,
+                chain_name: self.state.static_data.name.clone(),
+                block_number: block_num,
+                block_hash: block_hash.to_string(),
+            }).await {
+                warn!(error = %e, block_number = block_num,
+                    "Failed to send BlockProcessed event");
             }
 
             self.latest_block_num = block_num;
@@ -552,7 +562,7 @@ impl EvmBlockchainWorker {
     async fn process_block(
         &self,
         block_number: u64
-    ) -> anyhow::Result<(BlockHash, String)> {
+    ) -> (BlockHash, String) {
         let block = self.get_block(block_number).await;
 
         let block_hash = block.header.hash;
@@ -606,17 +616,17 @@ impl EvmBlockchainWorker {
             }
         }
 
-        Ok((block_hash, parent_hash))
+        (block_hash, parent_hash)
     }
 
     async fn process_logs(
         &self,
         block_hash: BlockHash,
         actual_lag: u64,
-    ) -> anyhow::Result<()> {
+    ) {
         if self.tokens_map.is_empty() {
             trace!("No tokens to watch, skipping log processing");
-            return Ok(());
+            return;
         }
 
         let filter = match self.tokens_map.len() < 15 {
@@ -732,7 +742,5 @@ impl EvmBlockchainWorker {
                 }
             }
         }
-
-        Ok(())
     }
 }

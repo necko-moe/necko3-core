@@ -3,12 +3,13 @@ use chrono::{DateTime, Utc};
 use uuid::Uuid;
 use necko3_types::{Webhook, WebhookStatus};
 use crate::backends::in_memory::InMemoryAdapter;
+use crate::error::{DbError, DbResult};
 use crate::model::{PaginatedVec, WebhookFilter, WebhookJob};
 use crate::traits::WebhookStore;
 
 #[async_trait]
 impl WebhookStore for InMemoryAdapter {
-    async fn get_webhooks(&self, filter: WebhookFilter) -> anyhow::Result<PaginatedVec<Webhook>> {
+    async fn get_webhooks(&self, filter: WebhookFilter) -> DbResult<PaginatedVec<Webhook>> {
         let mut filtered: Vec<Webhook> = self.webhooks.iter()
             .filter(|x| {
                 let wh = x.value();
@@ -39,16 +40,16 @@ impl WebhookStore for InMemoryAdapter {
         ))
     }
 
-    async fn get_webhook(&self, webhook_id: Uuid) -> anyhow::Result<Option<Webhook>> {
+    async fn get_webhook(&self, webhook_id: Uuid) -> DbResult<Option<Webhook>> {
         Ok(self.webhooks.get(&webhook_id).map(|x| x.value().clone()))
     }
 
-    async fn add_webhook(&self, webhook: &Webhook) -> anyhow::Result<()> {
+    async fn add_webhook(&self, webhook: &Webhook) -> DbResult<()> {
         self.webhooks.insert(webhook.id, webhook.clone());
         Ok(())
     }
 
-    async fn select_pending_webhooks(&self, limit: usize) -> anyhow::Result<Vec<WebhookJob>> {
+    async fn select_pending_webhooks(&self, limit: usize) -> DbResult<Vec<WebhookJob>> {
         let now = Utc::now();
 
         let target_ids: Vec<Uuid> = self.webhooks
@@ -84,20 +85,34 @@ impl WebhookStore for InMemoryAdapter {
         Ok(jobs)
     }
 
-    async fn update_webhook_status(&self, webhook_id: Uuid, status: WebhookStatus) -> anyhow::Result<()> {
+    async fn update_webhook_status(&self, webhook_id: Uuid, status: WebhookStatus) -> DbResult<()> {
+        if !self.webhooks.contains_key(&webhook_id) {
+            return Err(DbError::NotFound {
+                entity: "Webhook",
+                id: webhook_id.to_string(),
+            })
+        }
+        
         if let Some(mut job) = self.webhooks
-            .get_mut(&webhook_id)
-        {
+            .get_mut(&webhook_id) {
+            
             job.status = status;
         }
 
         Ok(())
     }
 
-    async fn schedule_webhook_retry(&self, webhook_id: Uuid, attempts: i32, next_retry: DateTime<Utc>) -> anyhow::Result<()> {
+    async fn schedule_webhook_retry(&self, webhook_id: Uuid, attempts: i32, next_retry: DateTime<Utc>) -> DbResult<()> {
+        if !self.webhooks.contains_key(&webhook_id) {
+            return Err(DbError::NotFound {
+                entity: "Webhook",
+                id: webhook_id.to_string(),
+            })
+        }
+        
         if let Some(mut job) = self.webhooks
-            .get_mut(&webhook_id)
-        {
+            .get_mut(&webhook_id) {
+            
             job.status = WebhookStatus::Pending;
             job.attempts = attempts as u32;
             job.next_retry = next_retry;

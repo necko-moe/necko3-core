@@ -1,7 +1,8 @@
 [package]
 name = "necko3-types"
-version = "0.1.6"
-edition = "2024"
+version.workspace = true
+authors.workspace = true
+edition.workspace = true
 
 [dependencies]
 serde.workspace = true

@@ -10,6 +10,7 @@ use alloy::transports::{BoxFuture, TransportError, TransportErrorKind};
 use tower::{Layer, Service, ServiceBuilder};
 use tracing::{debug, warn};
 use url::Url;
+use crate::backends::evm::ProviderError;
 
 #[derive(Clone)]
 pub struct RpcErrorFallbackLayer;
@@ -83,7 +84,7 @@ where
     }
 }
 
-pub fn create_fallback_provider(rpc_urls: &[String]) -> anyhow::Result<DynProvider<AnyNetwork>> {
+pub fn create_fallback_provider(rpc_urls: &[String]) -> Result<DynProvider<AnyNetwork>, ProviderError> {
     let http_client = reqwest::Client::builder()
         .timeout(Duration::from_secs(5))
         .build()?;
@@ -107,7 +108,7 @@ pub fn create_fallback_provider(rpc_urls: &[String]) -> anyhow::Result<DynProvid
     }
 
     if transports.is_empty() {
-        anyhow::bail!("No RPC URLs provided")
+        return Err(ProviderError::NoValidUrls)
     }
 
     let fallback_layer = FallbackLayer::default();
