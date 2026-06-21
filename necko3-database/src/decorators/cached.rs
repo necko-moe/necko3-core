@@ -424,8 +424,8 @@ impl<D: DatabaseExt> InvoiceStore for CachedDb<D> {
         self.inner.expire_old_invoices().await
     }
 
-    async fn update_invoice_paid(&self, invoice_id: Uuid, paid_raw: U256, new_status: Option<InvoiceStatus>) -> anyhow::Result<()> {
-        self.inner.update_invoice_paid(invoice_id, paid_raw, new_status).await
+    async fn update_invoice_paid(&self, invoice_id: Uuid, payment_id: Uuid, paid_raw: U256, new_status: Option<InvoiceStatus>) -> anyhow::Result<()> {
+        self.inner.update_invoice_paid(invoice_id, payment_id, paid_raw, new_status).await
     }
 }
 

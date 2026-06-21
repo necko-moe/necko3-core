@@ -1,3 +1,6 @@
+pub mod fallback_provider;
+
+use std::cmp::min;
 use std::collections::{HashMap, HashSet};
 use std::hash::Hash;
 use std::str::FromStr;
@@ -18,7 +21,7 @@ use tokio::time::MissedTickBehavior;
 use tracing::{debug, error, info, instrument, trace, warn, Instrument};
 use necko3_types::blockchain::{Asset, ChainEvent, ChainState, StateCommand, TrackTransaction};
 use necko3_types::TokenData;
-use crate::backends::create_fallback_provider;
+use crate::backends::evm::fallback_provider::create_fallback_provider;
 use crate::traits::adapter::BlockchainAdapter;
 use crate::traits::worker::BlockchainWorker;
 
@@ -31,10 +34,9 @@ sol! {
 
 pub struct EvmBlockchain;
 
-#[async_trait]
 impl BlockchainAdapter for EvmBlockchain {
-    #[instrument(level = "debug")]
-    fn derive_address(xpub: String, index: u32) -> anyhow::Result<String> {
+    #[instrument(skip(self), level = "debug")]
+    fn derive_address(&self, xpub: String, index: u32) -> anyhow::Result<String> {
         trace!("Deriving address for index {}", index);
 
         let xpub = XPub::from_str(&xpub)?;
@@ -329,7 +331,9 @@ impl EvmBlockchainWorker {
             return;
         }
 
-        for block_num in (self.latest_block_num + 1)..=rpc_block_with_lag {
+        let range_to = min(rpc_block_with_lag, self.latest_block_num + 5);
+
+        for block_num in (self.latest_block_num + 1)..=range_to {
             let block_opt = match self.process_block(block_num).await
             {
                 Ok(b) => Some(b),
@@ -689,7 +693,7 @@ impl EvmBlockchainWorker {
                     continue
                 }
 
-                let asset = Asset::Token(token_data.symbol.clone(), contract_address.to_string());
+                let asset = Asset::Token(token_data.symbol.clone());
                 let amount = event_data.value;
                 let from = event_data.from.to_string();
                 let amount_human = format_units(amount, token_data.decimals)

@@ -1,14 +1,14 @@
 [package]
 name = "necko3-blockchain"
-version = "0.1.6"
+version = "0.1.7"
 edition = "2024"
 
 [dependencies]
-tokio = { version = "1", features = ["sync"] }
-tracing = "0.1"
+tokio.workspace = true
+tracing.workspace = true
 
 coins-bip32 = "0.13"
-alloy = { version = "2.0.5", features = ["full", "reqwest-rustls-tls"] }
+alloy = { version = "2.1.0", features = ["full", "reqwest-rustls-tls", "rpc", "json-rpc"] }
 
 tower = "0.5"
 reqwest = "0.13.4"

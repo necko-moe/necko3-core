@@ -6,34 +6,47 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use dashmap::DashMap;
 use tokio::sync::mpsc;
-use tokio::task::AbortHandle;
 use tracing::{debug, error, warn};
 use uuid::Uuid;
 use necko3_blockchain::backends::evm::EvmBlockchain;
 use necko3_blockchain::traits::adapter::BlockchainAdapter;
 use necko3_database::decorators::notifying::DbEvent;
 use necko3_database::traits::DatabaseExt;
-use necko3_types::blockchain::{ChainEvent, ChainState, StateCommand, TrackTransaction};
+use necko3_types::blockchain::{ChainEvent, ChainState, StateCommand};
 use necko3_types::{ChainData, ChainType, InvoiceStatus, WebhookEvent};
+use crate::core::Worker;
 use crate::types::{CoreEvent, ExternalEvent, NeckoEvent};
 
 pub struct NeckoOrchestrator<D> {
     db: Arc<D>,
     db_event_rx: mpsc::Receiver<DbEvent>,
 
-    active_workers: Arc<DashMap<String, AbortHandle>>,
-
     chain_event_tx: mpsc::Sender<ChainEvent>,
     chain_event_rx: mpsc::Receiver<ChainEvent>,
 
     core_event_tx: mpsc::Sender<NeckoEvent>,
 
-    worker_states: Arc<DashMap<String, mpsc::Sender<StateCommand>>>,
-    worker_transaction_txs: Arc<DashMap<String, mpsc::Sender<TrackTransaction>>>,
+    workers: Arc<DashMap<String, Worker>>,
+}
+
+impl<D> NeckoOrchestrator<D> {
+    pub fn new(
+        db: Arc<D>,
+
+        db_event_rx: mpsc::Receiver<DbEvent>,
+        chain_event_tx: mpsc::Sender<ChainEvent>,
+        chain_event_rx: mpsc::Receiver<ChainEvent>,
+
+        core_event_tx: mpsc::Sender<NeckoEvent>,
+
+        workers: Arc<DashMap<String, Worker>>,
+    ) -> Self {
+        Self { db, db_event_rx, chain_event_tx, chain_event_rx, core_event_tx, workers }
+    }
 }
 
 impl<D: DatabaseExt> NeckoOrchestrator<D> {
-    pub async fn run(mut self) {
+    pub async fn run(mut self, ready_tx: tokio::sync::oneshot::Sender<()>) {
         let chains = self.db.get_chains().await.unwrap_or_else(|e| {
             warn!(error = %e, "Failed to initialize workers (get_chains)");
             vec![]
@@ -42,6 +55,8 @@ impl<D: DatabaseExt> NeckoOrchestrator<D> {
         for chain in chains {
             self.init_chain(chain).await;
         }
+
+        let _ = ready_tx.send(());
 
         loop {
             tokio::select! {
@@ -106,18 +121,24 @@ impl<D: DatabaseExt> NeckoOrchestrator<D> {
             }
         };
 
-        if let Some(worker) = self.active_workers.insert(chain_name.clone(), abort_handle) {
-            worker.abort();
+        let worker = Worker {
+            adapter: Box::new(EvmBlockchain),
+            abort_handle,
+            state_tx,
+            transaction_tx,
+        };
+
+        if let Some(worker) = self.workers.get(&chain_name) {
+            worker.abort_handle.abort();
             debug!(chain_name, "Previous worker task aborted");
         }
 
-        self.worker_states.insert(chain_name.clone(), state_tx);
-        self.worker_transaction_txs.insert(chain_name.clone(), transaction_tx);
+        self.workers.insert(chain_name, worker);
     }
 
     fn get_worker_state_tx(&self, chain_name: &str) -> Option<mpsc::Sender<StateCommand>> {
-        let tx = self.worker_states.get(chain_name)?;
-        Some(tx.clone())
+        let tx = self.workers.get(chain_name)?.value().state_tx.clone();
+        Some(tx)
     }
 }
 
@@ -157,11 +178,11 @@ impl<D: DatabaseExt> NeckoOrchestrator<D> {
                 "Failed to send CoreEvent::TransactionConfirmed event");
         };
     }
-    
+
     async fn handle_invoice_status_change(
-        &self, 
-        invoice_id: Uuid, 
-        paid_amount: String, 
+        &self,
+        invoice_id: Uuid,
+        paid_amount: String,
         new_status: InvoiceStatus
     ) {
         let (webhook, core_event) = match new_status {

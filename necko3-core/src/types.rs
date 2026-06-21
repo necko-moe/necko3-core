@@ -9,19 +9,17 @@ pub enum NeckoEvent {
     Ext(ExternalEvent),
 }
 
-impl NeckoEvent {
-    pub fn as_core(&self) -> Option<&CoreEvent> {
-        match self {
-            NeckoEvent::Core(e) => Some(e),
-            _ => None,
-        }
+impl TryFrom<NeckoEvent> for CoreEvent {
+    type Error = ();
+    fn try_from(event: NeckoEvent) -> Result<Self, Self::Error> {
+        if let NeckoEvent::Core(core) = event { Ok(core) } else { Err(()) }
     }
+}
 
-    pub fn as_ext(&self) -> Option<&ExternalEvent> {
-        match self {
-            NeckoEvent::Ext(e) => Some(e),
-            _ => None,
-        }
+impl TryFrom<NeckoEvent> for ExternalEvent {
+    type Error = ();
+    fn try_from(event: NeckoEvent) -> Result<Self, Self::Error> {
+        if let NeckoEvent::Ext(ext) = event { Ok(ext) } else { Err(()) }
     }
 }
 
@@ -80,6 +78,7 @@ pub enum ExternalEvent {
 
     InvoicePaymentApplied {
         invoice_id: Uuid,
+        payment_id: Uuid,
 
         paid_raw_before: U256,
         paid_raw_after: U256,

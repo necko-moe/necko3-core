@@ -164,7 +164,7 @@ impl InvoiceStore for PostgresAdapter {
         Ok(rows)
     }
 
-    async fn update_invoice_paid(&self, invoice_id: Uuid, paid_raw: U256, new_status: Option<InvoiceStatus>) -> anyhow::Result<()> {
+    async fn update_invoice_paid(&self, invoice_id: Uuid, _payment_id: Uuid, paid_raw: U256, new_status: Option<InvoiceStatus>) -> anyhow::Result<()> {
         let paid_bd = BigDecimal::from_str(&paid_raw.to_string())?;
 
         sqlx::query(

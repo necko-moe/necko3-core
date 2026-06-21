@@ -1,3 +1,4 @@
+use std::sync::atomic::Ordering;
 use async_trait::async_trait;
 use necko3_types::{ChainData, PartialChainUpdate};
 use crate::backends::in_memory::InMemoryAdapter;
@@ -20,8 +21,11 @@ impl ChainStore for InMemoryAdapter {
     }
 
     async fn add_chain(&self, chain_config: &ChainData) -> anyhow::Result<()> {
+        let mut chain_config = chain_config.clone();
+        chain_config.id = self.chains_last_id.fetch_add(1, Ordering::SeqCst) ;
+        
         self.chains.write()
-            .insert(chain_config.id.to_string(), chain_config.clone());
+            .insert(chain_config.name.clone(), chain_config);
 
         Ok(())
     }

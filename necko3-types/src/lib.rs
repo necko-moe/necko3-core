@@ -53,10 +53,11 @@ pub struct PartialChainUpdate {
     pub logo_url: Option<String>,
 }
 
-#[derive(Debug, Copy, Clone, Serialize, Deserialize,
+#[derive(Debug, Default, Copy, Clone, Serialize, Deserialize,
     Display, EnumString, AsRefStr)]
 #[strum(serialize_all = "UPPERCASE")]
 pub enum ChainType {
+    #[default]
     EVM
 }
 

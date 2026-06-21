@@ -85,6 +85,13 @@ pub trait DatabaseExt: DatabaseStore {
         let invoice = self.get_invoice_by_address(&payment.to).await?;
 
         if let Some(invoice) = invoice {
+            if invoice.network != payment.network || invoice.token != payment.token {
+                anyhow::bail!(
+                    "Asset mismatch for invoice {}: expected {} ({}), got {} ({})",
+                    invoice.id, invoice.token, invoice.network, payment.token, payment.network
+                );
+            }
+
             let old_status = invoice.status;
             let paid_raw_before = invoice.paid_raw;
             let new_paid_raw = invoice.paid_raw + payment.amount_raw;
@@ -94,7 +101,7 @@ pub trait DatabaseExt: DatabaseStore {
                 Some(InvoiceStatus::Paid)
             } else { None };
 
-            self.update_invoice_paid(invoice.id, new_paid_raw, new_status).await?;
+            self.update_invoice_paid(invoice.id, payment_id, new_paid_raw, new_status).await?;
 
             Ok(Some(FinalizedPaymentInfo {
                 is_fully_paid,

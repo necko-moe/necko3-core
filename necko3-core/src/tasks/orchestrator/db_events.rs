@@ -17,12 +17,11 @@ impl<D: DatabaseExt> NeckoOrchestrator<D> {
                 self.init_chain(chain_data).await;
             }
             DbEvent::ChainRemoved { chain_data } => {
-                if let Some((_, worker)) = self.active_workers.remove(&chain_data.name) {
-                    worker.abort();
+                if let Some(worker) = self.workers.get(&chain_data.name) {
+                    worker.abort_handle.abort();
                 }
 
-                self.worker_states.remove(&chain_data.name);
-                self.worker_transaction_txs.remove(&chain_data.name);
+                self.workers.remove(&chain_data.name);
             }
             DbEvent::ChainPartialUpdated { chain_name, partial_update } => {
                 self.handle_chain_partial_updated(chain_name, partial_update).await;
@@ -56,11 +55,11 @@ impl<D: DatabaseExt> NeckoOrchestrator<D> {
             DbEvent::OldInvoicesExpired { invoices_info } => {
                 self.handle_old_invoices_expired(invoices_info).await;
             }
-            DbEvent::InvoicePaymentApplied { invoice_id, paid_raw_before,
+            DbEvent::InvoicePaymentApplied { invoice_id, payment_id, paid_raw_before,
                 paid_raw_after, old_status, new_status }
             => {
-                self.handle_invoice_payment_applied(invoice_id, paid_raw_before, paid_raw_after,
-                                                    old_status, new_status).await;
+                self.handle_invoice_payment_applied(invoice_id, payment_id, paid_raw_before,
+                                                    paid_raw_after, old_status, new_status).await;
             }
 
             DbEvent::PaymentUpserted { payment_id, payment, is_new_payment } => {
@@ -314,6 +313,7 @@ impl<D: DatabaseExt> NeckoOrchestrator<D> {
     async fn handle_invoice_payment_applied(
         &self,
         invoice_id: Uuid,
+        payment_id: Uuid,
         paid_raw_before: U256,
         paid_raw_after: U256,
         old_status: InvoiceStatus,
@@ -322,6 +322,7 @@ impl<D: DatabaseExt> NeckoOrchestrator<D> {
         if let Err(e) = self.core_event_tx.send(
             NeckoEvent::Ext(ExternalEvent::InvoicePaymentApplied {
                 invoice_id,
+                payment_id,
                 paid_raw_before,
                 paid_raw_after,
                 old_status,
@@ -383,10 +384,10 @@ impl<D: DatabaseExt> NeckoOrchestrator<D> {
         }
 
         if payment.required_confirmations > 0 {
-            let transaction_tx = match self.worker_transaction_txs.get(&payment.network) {
-                Some(tx) => tx,
+            let transaction_tx = match self.workers.get(&payment.network) {
+                Some(worker) => worker.value().transaction_tx.clone(),
                 None => {
-                    error!("self.worker_transaction_txs out of sync: unknown key '{}'", payment.network);
+                    error!("self.workers out of sync: unknown key '{}'", payment.network);
                     return
                 }
             };

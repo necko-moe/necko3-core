@@ -7,21 +7,24 @@ pub mod xpub_store;
 pub mod indexed_blocks_store;
 pub mod database_ext;
 
-use std::collections::HashMap;
-use std::sync::atomic::AtomicU64;
+use crate::traits::DatabaseAdapter;
 use alloy_primitives::BlockNumber;
 use async_trait::async_trait;
 use dashmap::DashMap;
-use parking_lot::RwLock;
-use uuid::Uuid;
 use necko3_types::{ChainData, Invoice, Payment, TokenData, Webhook};
-use crate::traits::DatabaseAdapter;
+use parking_lot::RwLock;
+use std::collections::HashMap;
+use std::sync::atomic::{AtomicI32, AtomicU64};
+use uuid::Uuid;
 
 #[derive(Default)]
 pub struct InMemoryAdapter {
     chains: RwLock<HashMap<String, ChainData>>,
     indexed_blocks: DashMap<(i32, BlockNumber), String>,
     tokens: RwLock<HashMap<String, HashMap<String, TokenData>>>,
+    
+    chains_last_id: AtomicI32,
+    tokens_last_id: AtomicI32,
 
     invoices: DashMap<Uuid, Invoice>,
     payments: DashMap<Uuid, Payment>,

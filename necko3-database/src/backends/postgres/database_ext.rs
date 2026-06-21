@@ -17,51 +17,72 @@ impl DatabaseExt for PostgresAdapter {
 
         let row = sqlx::query(
             r#"UPDATE payments SET status = 'Confirmed' WHERE id = $1
-                                         RETURNING "to", amount_raw::TEXT"#
+                                         RETURNING "to", amount_raw::TEXT, network, token"#
         )
             .bind(payment_id)
             .fetch_one(&mut *tx)
             .await?;
 
         let to_address: String = row.get("to");
-        let pay_amount_bd = BigDecimal::from_str(&row.get::<String, _>("amount_raw"))?;
+
+        let pay_amount_str: String = row.get("amount_raw");
+        let pay_amount_bd = BigDecimal::from_str(&pay_amount_str)?;
+        let pay_amount_u256 = U256::from_str(&pay_amount_str)?;
+
+        let pay_network: String = row.get("network");
+        let pay_token: String = row.get("token");
 
         let inv_opt = sqlx::query(
-            r#"UPDATE invoices SET paid_raw = paid_raw + $1 WHERE address = $2
-                   RETURNING (paid_raw - $1)::TEXT as old_paid_raw,
+            r#"SELECT paid_raw::TEXT as old_paid_raw,
                        paid_raw::TEXT as new_paid_raw,
                        amount_raw::TEXT,
-                       status,
-                       id"# // could've used OLD.paid_raw and NEW.paid_raw but i wouldn't (sorry pg18)
+                       status, id, network, token
+                   FROM invoices WHERE address = $1 FOR UPDATE"#
         )
-            .bind(pay_amount_bd)
             .bind(to_address)
             .fetch_optional(&mut *tx)
             .await?;
 
         if let Some(inv) = inv_opt {
+            let inv_id: Uuid = inv.get("id");
+            let inv_network: String = inv.get("network");
+            let inv_token: String = inv.get("token");
+
+            if inv_network != pay_network || inv_token != pay_token {
+                tx.commit().await?;
+
+                anyhow::bail!(
+                    "Asset mismatch for invoice {}: expected {} ({}), got {} ({})",
+                    inv_id, inv_token, inv_network, pay_token, pay_network
+                );
+            }
+
             let inv_paid_before = U256::from_str(&inv.get::<String, _>("old_paid_raw"))
                 .map_err(|e| anyhow::anyhow!("Failed to parse old_paid_raw: {}", e))?;
-            let inv_paid_after = U256::from_str(&inv.get::<String, _>("new_paid_raw"))
-                .map_err(|e| anyhow::anyhow!("Failed to parse new_paid_raw: {}", e))?;
             let inv_amount = U256::from_str(&inv.get::<String, _>("amount_raw"))
                 .map_err(|e| anyhow::anyhow!("Failed to parse amount_raw: {}", e))?;
+
+            let inv_paid_after = inv_paid_before + pay_amount_u256;
 
             let old_status_str: String = inv.get("status");
             let old_status: InvoiceStatus = old_status_str.parse()
                 .map_err(|e| anyhow::anyhow!("Unknown invoice status '{}' from DB: {}", old_status_str, e))?;
 
-            let inv_id: Uuid = inv.get("id");
-
             let is_fully_paid = inv_paid_after >= inv_amount;
             let new_status = if is_fully_paid {
-                sqlx::query("UPDATE invoices SET status = 'Paid' WHERE id = $1")
-                    .bind(inv_id)
-                    .execute(&mut *tx)
-                    .await?;
-
                 InvoiceStatus::Paid
             } else { old_status };
+
+            sqlx::query(
+                r#"UPDATE invoices
+                       SET paid_raw = paid_raw + $1, status = $2
+                       WHERE id = $3"#
+            )
+                .bind(&pay_amount_bd)
+                .bind(new_status.as_ref())
+                .bind(inv_id)
+                .execute(&mut *tx)
+                .await?;
 
             tx.commit().await?;
 

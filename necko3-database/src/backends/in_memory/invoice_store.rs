@@ -103,7 +103,7 @@ impl InvoiceStore for InMemoryAdapter {
         Ok(expired)
     }
 
-    async fn update_invoice_paid(&self, invoice_id: Uuid, paid_raw: U256, new_status: Option<InvoiceStatus>) -> anyhow::Result<()> {
+    async fn update_invoice_paid(&self, invoice_id: Uuid, _payment_id: Uuid, paid_raw: U256, new_status: Option<InvoiceStatus>) -> anyhow::Result<()> {
         if let Some(mut invoice) = self.invoices.get_mut(&invoice_id) {
             invoice.paid_raw = paid_raw;
             invoice.paid = format_units(paid_raw, invoice.decimals)?;

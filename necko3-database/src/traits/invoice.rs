@@ -14,6 +14,6 @@ pub trait InvoiceStore: Sync + Send {
     async fn get_invoice_by_address(&self, address: &str) -> anyhow::Result<Option<Invoice>>;
     async fn expire_old_invoices(&self) -> anyhow::Result<Vec<ExpiredInvoiceInfo>>;
 
-    async fn update_invoice_paid(&self, invoice_id: Uuid, paid_raw: U256, new_status: Option<InvoiceStatus>) -> anyhow::Result<()>;
+    async fn update_invoice_paid(&self, invoice_id: Uuid, payment_id: Uuid, paid_raw: U256, new_status: Option<InvoiceStatus>) -> anyhow::Result<()>;
 
 }

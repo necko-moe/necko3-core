@@ -1,3 +1,4 @@
+use std::sync::atomic::Ordering;
 use async_trait::async_trait;
 use necko3_types::TokenData;
 use crate::backends::in_memory::InMemoryAdapter;
@@ -55,6 +56,10 @@ impl TokenStore for InMemoryAdapter {
             anyhow::bail!("Chain {} not found in DB", chain_name)
         }
 
+
+        let mut token_config = token_config.clone();
+        token_config.id = self.tokens_last_id.fetch_add(1, Ordering::SeqCst) ;
+
         self.tokens.write()
             .entry(chain_name.to_string())
             .or_default()
@@ -66,11 +71,9 @@ impl TokenStore for InMemoryAdapter {
     async fn get_token_decimals(&self, chain_name: &str, token_symbol: &str) -> anyhow::Result<Option<u8>> {
         if let Some(chain) = self.chains.read()
             .get(chain_name)
-        {
-            if chain.native_symbol == token_symbol {
+            && chain.native_symbol == token_symbol {
                 return Ok(Some(chain.decimals));
             }
-        }
 
         let decimals = self.tokens.read()
             .get(chain_name)

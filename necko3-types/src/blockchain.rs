@@ -5,23 +5,24 @@ use strum::Display;
 
 #[derive(Display, Debug, Clone, Serialize, Deserialize)]
 pub enum Asset {
+    #[strum(to_string = "Asset::Native({0})")]
     Native(String),
-    /// symbol, contract_address
-    Token(String, String),
+    #[strum(to_string = "Asset::Token({0})")]
+    Token(String),
 }
 
 impl Asset {
     pub fn to_symbol(self) -> String {
         match self {
             Asset::Native(sym) => sym,
-            Asset::Token(sym, _) => sym,
+            Asset::Token(sym) => sym,
         }
     }
     
     pub fn as_symbol(&self) -> &str {
         match self {
             Asset::Native(sym) => sym,
-            Asset::Token(sym, _) => sym,
+            Asset::Token(sym) => sym,
         }
     }
 }

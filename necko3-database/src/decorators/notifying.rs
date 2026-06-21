@@ -30,8 +30,8 @@ pub enum DbEvent {
     InvoiceAdded { invoice: Invoice },
     InvoiceStatusUpdated { invoice_id: Uuid, new_status: InvoiceStatus },
     OldInvoicesExpired { invoices_info: Vec<ExpiredInvoiceInfo> },
-    InvoicePaymentApplied { invoice_id: Uuid, paid_raw_before: U256, paid_raw_after: U256,
-        old_status: InvoiceStatus, new_status: InvoiceStatus },
+    InvoicePaymentApplied { invoice_id: Uuid, payment_id: Uuid, paid_raw_before: U256, 
+        paid_raw_after: U256, old_status: InvoiceStatus, new_status: InvoiceStatus },
 
     PaymentUpserted { payment_id: Uuid, payment: UpsertPayment, is_new_payment: bool },
     PaymentStatusUpdated { payment_id: Uuid, new_status: PaymentStatus },
@@ -263,14 +263,15 @@ impl<D: DatabaseExt> InvoiceStore for NotifyingDb<D> {
         Ok(expired)
     }
 
-    async fn update_invoice_paid(&self, invoice_id: Uuid, paid_raw: U256, new_status: Option<InvoiceStatus>) -> anyhow::Result<()> {
+    async fn update_invoice_paid(&self, invoice_id: Uuid, payment_id: Uuid, paid_raw: U256, new_status: Option<InvoiceStatus>) -> anyhow::Result<()> {
         let invoice_opt = self.inner.get_invoice(invoice_id).await?;
         let Some(invoice) = invoice_opt else { return Ok(()) };
 
-        self.inner.update_invoice_paid(invoice_id, paid_raw, new_status).await?;
+        self.inner.update_invoice_paid(invoice_id, payment_id, paid_raw, new_status).await?;
 
         let _ = self.tx.send(DbEvent::InvoicePaymentApplied {
             invoice_id,
+            payment_id,
             paid_raw_before: invoice.paid_raw,
             paid_raw_after: paid_raw,
             old_status: invoice.status,
@@ -441,6 +442,7 @@ impl<D: DatabaseExt> DatabaseExt for NotifyingDb<D> {
         if let Some(info) = &info_opt {
             let _ = self.tx.send(DbEvent::InvoicePaymentApplied {
                 invoice_id: info.invoice_id,
+                payment_id,
                 paid_raw_before: info.paid_raw_before,
                 paid_raw_after: info.paid_raw_after,
                 old_status: info.old_invoice_status,
