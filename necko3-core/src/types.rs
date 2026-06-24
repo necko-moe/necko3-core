@@ -3,6 +3,14 @@ use necko3_types::blockchain::Asset;
 use uuid::Uuid;
 use necko3_types::InvoiceStatus;
 
+pub mod core {
+    pub mod db {
+        pub use necko3_database::model::*;
+    }
+
+    pub use necko3_types::*;
+}
+
 #[derive(Debug, Clone)]
 pub enum NeckoEvent {
     Core(CoreEvent),

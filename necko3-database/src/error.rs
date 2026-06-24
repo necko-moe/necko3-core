@@ -6,7 +6,7 @@ pub enum DbError {
     #[error("Database driver error: {0}")]
     Sqlx(#[from] sqlx::Error),
 
-    #[error("{entity} not found: {id}")]
+    #[error("{entity} '{id}' not found")]
     NotFound { entity: &'static str, id: String },
 
     #[error("Corrupted data in DB: {0}")]

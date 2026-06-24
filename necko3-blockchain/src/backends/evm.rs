@@ -10,7 +10,7 @@ use alloy::consensus::Transaction;
 use alloy::core::sol;
 use alloy::network::{AnyNetwork, AnyRpcBlock, TransactionResponse};
 use alloy::primitives::{Address, BlockHash, BlockNumber, TxHash, U256};
-use alloy::primitives::utils::format_units;
+use alloy::primitives::utils::{format_units, parse_units};
 use alloy::providers::{DynProvider, Provider};
 use alloy::rpc::types::Filter;
 use alloy::sol_types::SolEvent;
@@ -52,6 +52,14 @@ impl EvmBlockchain {
         Ok(addr)
     }
 
+    fn parse_u256_as_string_inner(&self, value: U256, decimals: u8) -> Result<String, EvmAdapterError> {
+        Ok(format_units(value, decimals)?)
+    }
+
+    fn parse_string_as_u256_inner(&self, value: &str, decimals: u8) -> Result<U256, EvmAdapterError> {
+        Ok(parse_units(value, decimals)?.into())
+    }
+    
     fn build_worker_inner(
         state: ChainState,
         tokens_map: HashMap<String, TokenData>,
@@ -96,6 +104,14 @@ impl BlockchainAdapter for EvmBlockchain {
     #[instrument(skip(self), level = "debug")]
     fn derive_address(&self, xpub: String, index: u32) -> Result<String, Self::Error> {
         Ok(self.derive_address_inner(xpub, index)?)
+    }
+
+    fn parse_u256_as_string(&self, value: U256, decimals: u8) -> Result<String, Self::Error> {
+        Ok(self.parse_u256_as_string_inner(value.into(), decimals)?)
+    }
+
+    fn parse_string_as_u256(&self, value: &str, decimals: u8) -> Result<U256, Self::Error> {
+        Ok(self.parse_string_as_u256_inner(value, decimals)?)
     }
 
     fn build_worker(

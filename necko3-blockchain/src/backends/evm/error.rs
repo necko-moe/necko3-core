@@ -1,4 +1,5 @@
 use alloy::hex::FromHexError;
+use alloy::primitives::utils::UnitsError;
 use coins_bip32::Bip32Error;
 use thiserror::Error;
 
@@ -23,6 +24,9 @@ pub enum EvmAdapterError {
         source: FromHexError,
     },
 
+    #[error("Failed to parse or format units: {0}")]
+    UnitConversion(#[from] UnitsError),
+    
     #[error("Provider initialization failed: {0}")]
     ProviderInit(#[from] ProviderError),
 }

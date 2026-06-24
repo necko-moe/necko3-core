@@ -286,6 +286,13 @@ impl<D: DatabaseExt> NeckoOrchestrator<D> {
                 warn!(error = %e, invoice_id = %invoice.id,
                             "Failed to create InvoiceExpired webhook job");
             }
+
+            if let Err(e) = self.core_event_tx.send(
+                NeckoEvent::Ext(ExternalEvent::InvoiceExpired {
+                invoice_id: invoice.id,
+            })).await {
+                warn!(error = %e, "Failed to send ExternalEvent::InvoiceExpired event");
+            };
         }
 
         let mut to_remove: HashMap<String, Vec<String>> = HashMap::new();

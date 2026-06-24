@@ -22,6 +22,7 @@ use crate::builder::invoice_config::{ExpirationTime, PaymentAddress, PaymentAmou
 use crate::builder::invoice_config::error::InvoiceCreationError;
 use crate::builder::NeckoCoreBuilder;
 use crate::builder::token_config::TokenConfig;
+use crate::error::UnitConversionError;
 use crate::types::NeckoEvent;
 
 pub struct Worker {
@@ -243,5 +244,25 @@ where
         self.db.add_invoice(&invoice).await?;
 
         Ok(invoice)
+    }
+}
+
+impl<D, E> NeckoCore<D, E> {
+    pub fn parse_u256_as_string(&self, network: &str, value: U256, decimals: u8) -> Result<String, UnitConversionError> {
+        let worker = self.workers.get(network)
+            .ok_or_else(|| UnitConversionError::WorkerNotInitialized(network.to_string()))?;
+        
+        let res = worker.adapter.parse_u256_as_string(value, decimals)?;
+        
+        Ok(res)
+    }
+
+    pub fn parse_string_as_u256(&self, network: &str, value: &str, decimals: u8) -> Result<U256, UnitConversionError> {
+        let worker = self.workers.get(network)
+            .ok_or_else(|| UnitConversionError::WorkerNotInitialized(network.to_string()))?;
+
+        let res = worker.adapter.parse_string_as_u256(value, decimals)?;
+
+        Ok(res)
     }
 }
