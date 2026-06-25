@@ -87,6 +87,8 @@ impl<D: DatabaseExt> NeckoOrchestrator<D> {
             NeckoEvent::Core(CoreEvent::TransactionReorged {
                 db_transaction_id: payment.id,
                 tx_hash: tx_hash.clone(),
+                new_block_number,
+                new_block_hash,
             })).await {
             warn!(error = %e, payment_id = %payment.id, tx_hash,
                         "Failed to send CoreEvent::TransactionReorged event");

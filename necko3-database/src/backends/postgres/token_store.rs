@@ -1,9 +1,8 @@
-use async_trait::async_trait;
-use necko3_types::TokenData;
 use crate::backends::postgres::PostgresAdapter;
 use crate::error::{DbError, DbResult};
-use crate::traits::token::DbTokenId;
 use crate::traits::{ChainStore, TokenStore};
+use async_trait::async_trait;
+use necko3_types::TokenData;
 
 #[async_trait]
 impl TokenStore for PostgresAdapter {
@@ -105,14 +104,14 @@ impl TokenStore for PostgresAdapter {
         })
     }
 
-    async fn add_token(&self, chain_name: &str, token_config: &TokenData) -> DbResult<DbTokenId> {
-        let id_opt: Option<i32> = sqlx::query_scalar(
+    async fn add_token(&self, chain_name: &str, token_config: &TokenData) -> DbResult<TokenData> {
+        let row_opt = sqlx::query(
             r#"INSERT INTO tokens
                (chain_id, symbol, contract_address, decimals, logo_url)
                SELECT chains.id, $2, $3, $4, $5
                FROM chains
                WHERE name = $1
-               RETURNING tokens.id"#
+               RETURNING tokens.*"#
         )
             .bind(chain_name)
             .bind(&token_config.symbol)
@@ -122,13 +121,13 @@ impl TokenStore for PostgresAdapter {
             .fetch_optional(&self.pool)
             .await?;
 
-        let Some(id) = id_opt else {
+        let Some(row) = row_opt else {
             return Err(DbError::NotFound {
                 entity: "Chain",
                 id: chain_name.to_string(),
             })
         };
 
-        Ok(id)
+        Ok(Self::map_row_to_token(row))
     }
 }

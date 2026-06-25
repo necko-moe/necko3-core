@@ -5,9 +5,6 @@ pub mod tasks;
 pub mod error;
 
 pub mod prelude {
-    pub use crate::builder::NeckoCoreBuilder;
-    pub use crate::core::NeckoCore;
-
     pub mod db {
         pub mod backends {
             pub use necko3_database::backends::in_memory::InMemoryAdapter;
@@ -16,7 +13,7 @@ pub mod prelude {
 
         pub use necko3_database::decorators::*;
 
-        pub use necko3_database::traits::*;
-        pub use necko3_database::error::{DbError, DbExtError};
+        pub use necko3_database::traits::DatabaseExt;
+        pub use necko3_database::error::*;
     }
 }

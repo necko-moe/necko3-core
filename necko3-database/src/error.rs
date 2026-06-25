@@ -6,6 +6,9 @@ pub enum DbError {
     #[error("Database driver error: {0}")]
     Sqlx(#[from] sqlx::Error),
 
+    #[error("Failed to run migrations: {0}")]
+    Migration(#[from] sqlx::migrate::MigrateError),
+
     #[error("{entity} '{id}' not found")]
     NotFound { entity: &'static str, id: String },
 
@@ -31,5 +34,5 @@ pub enum DbExtError {
     },
 }
 
-pub type DbExtResult<T> = Result<T, DbExtError>;
 pub type DbResult<T> = Result<T, DbError>;
+pub type DbExtResult<T> = Result<T, DbExtError>;

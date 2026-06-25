@@ -2,13 +2,16 @@ pub mod error;
 
 use alloy_primitives::U256;
 use chrono::{DateTime, Utc};
+use serde::{Deserialize, Serialize};
 
+#[derive(Serialize, Deserialize)]
 pub enum PaymentAddress {
     UseExisting(String),
     GenerateNew,
     WithXpub { xpub: String, derivation_index: u32 },
 }
 
+#[derive(Serialize, Deserialize)]
 pub enum PaymentAmount {
     Raw(U256),
     Human(String),
@@ -38,21 +41,18 @@ impl From<U256> for PaymentAmount {
     }
 }
 
-#[derive(Default)]
+#[derive(Default, Serialize, Deserialize)]
 pub enum PaymentAsset {
     /// use native asset
     #[default]
     Native,
     /// token symbol
     Token(String),
+    /// could be native or token symbol...
+    Unknown(String)
 }
 
-impl From<&str> for PaymentAsset {
-    fn from(value: &str) -> Self {
-        Self::Token(value.to_string())
-    }
-}
-
+#[derive(Serialize, Deserialize)]
 pub struct PaymentSpec {
     pub amount: PaymentAmount,
     pub network: String,
@@ -74,6 +74,7 @@ impl PaymentSpec {
     }
 }
 
+#[derive(Serialize, Deserialize)]
 pub enum ExpirationTime {
     Timestamp(DateTime<Utc>),
     Duration(std::time::Duration),
@@ -91,6 +92,7 @@ impl From<std::time::Duration> for ExpirationTime {
     }
 }
 
+#[derive(Serialize, Deserialize)]
 pub struct WebhookConfig {
     pub url: String,
     pub secret: String,

@@ -34,6 +34,10 @@ impl DatabaseAdapter for PostgresAdapter {
             .connect(database_url)
             .await?;
 
+        sqlx::migrate!("./migrations/postgres")
+            .run(&pool)
+            .await?;
+
         sqlx::query(
             "UPDATE webhooks SET status = 'Pending' WHERE status = 'Processing'"
         )

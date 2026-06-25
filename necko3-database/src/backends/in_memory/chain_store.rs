@@ -1,10 +1,9 @@
-use std::sync::atomic::Ordering;
-use async_trait::async_trait;
-use necko3_types::{ChainData, PartialChainUpdate};
 use crate::backends::in_memory::InMemoryAdapter;
 use crate::error::{DbError, DbResult};
-use crate::traits::chain::DbChainId;
 use crate::traits::ChainStore;
+use async_trait::async_trait;
+use necko3_types::{ChainData, PartialChainUpdate};
+use std::sync::atomic::Ordering;
 
 #[async_trait]
 impl ChainStore for InMemoryAdapter {
@@ -22,16 +21,16 @@ impl ChainStore for InMemoryAdapter {
             .cloned())
     }
 
-    async fn add_chain(&self, chain_config: &ChainData) -> DbResult<DbChainId> {
+    async fn add_chain(&self, chain_config: &ChainData) -> DbResult<ChainData> {
         let next_id = self.chains_last_id.fetch_add(1, Ordering::SeqCst);
 
         let mut chain_config = chain_config.clone();
         chain_config.id = next_id;
         
         self.chains.write()
-            .insert(chain_config.name.clone(), chain_config);
+            .insert(chain_config.name.clone(), chain_config.clone());
 
-        Ok(next_id)
+        Ok(chain_config)
     }
 
     async fn remove_chain(&self, chain_name: &str) -> DbResult<ChainData> {

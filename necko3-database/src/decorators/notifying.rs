@@ -1,15 +1,13 @@
-use std::collections::HashMap;
+use crate::error::{DbExtResult, DbResult};
 use crate::model::{ExpiredInvoiceInfo, FinalizedPaymentInfo, InvoiceFilter, PaginatedVec, PaymentFilter, WebhookFilter, WebhookJob};
 use crate::traits::{ChainStore, DatabaseExt, IndexedBlocksStore, InvoiceStore, PaymentStore, TokenStore, WebhookStore, XPubStore};
 use alloy_primitives::{BlockNumber, U256};
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
+use necko3_types::{ChainData, Invoice, InvoiceStatus, PartialChainUpdate, Payment, PaymentStatus, TokenData, UpsertPayment, Webhook, WebhookStatus};
+use std::collections::HashMap;
 use tokio::sync::mpsc;
 use uuid::Uuid;
-use necko3_types::{PaymentStatus, TokenData, PartialChainUpdate, Payment, ChainData, UpsertPayment, Invoice, InvoiceStatus, WebhookStatus, Webhook};
-use crate::error::{DbExtResult, DbResult};
-use crate::traits::chain::DbChainId;
-use crate::traits::token::DbTokenId;
 
 pub struct NotifyingDb<D> {
     inner: D,
@@ -75,14 +73,14 @@ impl<D: DatabaseExt> ChainStore for NotifyingDb<D> {
         self.inner.get_chain_by_id(id).await
     }
 
-    async fn add_chain(&self, chain_config: &ChainData) -> DbResult<DbChainId> {
-        let id = self.inner.add_chain(chain_config).await?;
+    async fn add_chain(&self, chain_config: &ChainData) -> DbResult<ChainData> {
+        let data = self.inner.add_chain(chain_config).await?;
 
         let _ = self.tx.send(DbEvent::ChainAdded {
             chain_data: chain_config.clone(),
         }).await;
 
-        Ok(id)
+        Ok(data)
     }
 
     async fn remove_chain(&self, chain_name: &str) -> DbResult<ChainData> {
@@ -199,15 +197,15 @@ impl<D: DatabaseExt> TokenStore for NotifyingDb<D> {
         Ok(token)
     }
 
-    async fn add_token(&self, chain_name: &str, token_config: &TokenData) -> DbResult<DbTokenId> {
-        let id = self.inner.add_token(chain_name, token_config).await?;
+    async fn add_token(&self, chain_name: &str, token_config: &TokenData) -> DbResult<TokenData> {
+        let data = self.inner.add_token(chain_name, token_config).await?;
 
         let _ = self.tx.send(DbEvent::TokenAdded {
             chain_name: chain_name.to_string(),
             token_data: token_config.clone(),
         }).await;
 
-        Ok(id)
+        Ok(data)
     }
 }
 

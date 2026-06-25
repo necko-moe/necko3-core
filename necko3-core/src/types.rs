@@ -66,6 +66,9 @@ pub enum CoreEvent {
     TransactionReorged {
         db_transaction_id: Uuid,
         tx_hash: String,
+
+        new_block_number: u64,
+        new_block_hash: String
     },
 
     TransactionFailed {
@@ -80,10 +83,6 @@ pub enum CoreEvent {
 
 #[derive(Debug, Clone)]
 pub enum ExternalEvent {
-    PaymentCancelled {
-        payment_id: Uuid,
-    },
-
     InvoicePaymentApplied {
         invoice_id: Uuid,
         payment_id: Uuid,
@@ -116,8 +115,5 @@ pub enum ExternalEvent {
         attempt: u32,
         max_attempts: u32,
         url: String,
-    },
-    WebhookCancelled {
-        webhook_id: Uuid,
     },
 }

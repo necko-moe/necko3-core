@@ -25,6 +25,7 @@ pub struct ChainData {
     pub safe_lag: u8,
     pub required_confirmations: u64,
     pub logo_url: Option<String>,
+    #[serde(skip_serializing_if = "HashSet::is_empty")]
     pub watch_addresses: HashSet<String>,
 }
 
@@ -129,7 +130,6 @@ pub enum PaymentStatus {
     Confirming,
     Confirmed,
     Failed,
-    Cancelled,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq,
@@ -191,9 +191,6 @@ pub enum WebhookEvent {
         tx_hash: String,
         confirmations: u64,
     },
-    PaymentCancelled {
-        payment_id: Uuid,
-    },
     InvoicePaid {
         invoice_id: Uuid,
         paid_amount: String,
@@ -212,7 +209,6 @@ pub enum WebhookEvent {
 pub enum WebhookStatus {
     Pending,
     Processing,
-    Sent,
+    Delivered,
     Failed,
-    Cancelled,
 }

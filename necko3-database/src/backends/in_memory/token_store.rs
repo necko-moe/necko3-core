@@ -1,10 +1,9 @@
-use std::sync::atomic::Ordering;
-use async_trait::async_trait;
-use necko3_types::TokenData;
 use crate::backends::in_memory::InMemoryAdapter;
 use crate::error::{DbError, DbResult};
-use crate::traits::token::DbTokenId;
 use crate::traits::TokenStore;
+use async_trait::async_trait;
+use necko3_types::TokenData;
+use std::sync::atomic::Ordering;
 
 #[async_trait]
 impl TokenStore for InMemoryAdapter {
@@ -67,7 +66,7 @@ impl TokenStore for InMemoryAdapter {
         Ok(token)
     }
 
-    async fn add_token(&self, chain_name: &str, token_config: &TokenData) -> DbResult<DbTokenId> {
+    async fn add_token(&self, chain_name: &str, token_config: &TokenData) -> DbResult<TokenData> {
         if !self.chains.read().contains_key(chain_name) {
             return Err(DbError::NotFound {
                 entity: "Chain",
@@ -85,6 +84,6 @@ impl TokenStore for InMemoryAdapter {
             .or_default()
             .insert(token_config.symbol.clone(), token_config.clone());
 
-        Ok(next_id)
+        Ok(token_config)
     }
 }

@@ -1,7 +1,5 @@
 use crate::error::DbResult;
 use crate::model::{ExpiredInvoiceInfo, InvoiceFilter, PaginatedVec, PaymentFilter, WebhookFilter, WebhookJob};
-use crate::traits::chain::DbChainId;
-use crate::traits::token::DbTokenId;
 use crate::traits::{ChainStore, DatabaseExt, IndexedBlocksStore, InvoiceStore, PaymentStore, TokenStore, WebhookStore, XPubStore};
 use alloy_primitives::{BlockNumber, U256};
 use arc_swap::{ArcSwap, ArcSwapOption};
@@ -195,15 +193,15 @@ impl<D: DatabaseExt> ChainStore for CachedDb<D> {
         Ok(chains.into_iter().find(|c| c.id == id))
     }
 
-    async fn add_chain(&self, chain_config: &ChainData) -> DbResult<DbChainId> {
-        let id = self.inner.add_chain(chain_config).await?;
+    async fn add_chain(&self, chain_config: &ChainData) -> DbResult<ChainData> {
+        let data = self.inner.add_chain(chain_config).await?;
 
         self.chains_cache.store(None);
 
         self.symbol_decimals
             .insert((chain_config.name.clone(), chain_config.native_symbol.clone()), chain_config.decimals);
 
-        Ok(id)
+        Ok(data)
     }
 
     async fn remove_chain(&self, chain_name: &str) -> DbResult<ChainData> {
@@ -351,15 +349,15 @@ impl<D: DatabaseExt> TokenStore for CachedDb<D> {
         Ok(removed)
     }
 
-    async fn add_token(&self, chain_name: &str, token_config: &TokenData) -> DbResult<DbTokenId> {
-        let id = self.inner.add_token(chain_name, token_config).await?;
+    async fn add_token(&self, chain_name: &str, token_config: &TokenData) -> DbResult<TokenData> {
+        let data = self.inner.add_token(chain_name, token_config).await?;
 
         self.invalidate_tokens_cache(chain_name).await?;
 
         self.symbol_decimals
             .insert((chain_name.to_owned(), token_config.symbol.clone()), token_config.decimals);
 
-        Ok(id)
+        Ok(data)
     }
 }
 

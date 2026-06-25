@@ -14,9 +14,7 @@ use necko3_blockchain::error::BoxedError;
 use necko3_blockchain::traits::adapter::BlockchainAdapter;
 use necko3_database::backends::in_memory::InMemoryAdapter;
 use necko3_database::error::DbResult;
-use necko3_database::traits::chain::DbChainId;
-use necko3_database::traits::token::DbTokenId;
-use necko3_types::{Invoice, InvoiceStatus};
+use necko3_types::{ChainData, Invoice, InvoiceStatus, TokenData};
 use crate::builder::chain_config::ChainConfig;
 use crate::builder::invoice_config::{ExpirationTime, PaymentAddress, PaymentAmount, PaymentAsset, PaymentSpec, WebhookConfig};
 use crate::builder::invoice_config::error::InvoiceCreationError;
@@ -123,18 +121,18 @@ where
         self.db.clone()
     }
 
-    pub async fn add_chain(&self, chain_config: ChainConfig) -> DbResult<DbChainId> {
+    pub async fn add_chain(&self, chain_config: ChainConfig) -> DbResult<ChainData> {
         let (tokens, chain_data) = chain_config.into();
-        let id = self.db.add_chain(&chain_data).await?;
+        let data = self.db.add_chain(&chain_data).await?;
 
         for token in tokens {
             self.db.add_token(&chain_data.name, &token).await?;
         }
 
-        Ok(id)
+        Ok(data)
     }
 
-    pub async fn add_token(&self, chain_name: impl Into<String>, token: TokenConfig) -> DbResult<DbTokenId> {
+    pub async fn add_token(&self, chain_name: impl Into<String>, token: TokenConfig) -> DbResult<TokenData> {
         let token = token.into();
         self.db.add_token(&chain_name.into(), &token).await
     }
@@ -170,6 +168,22 @@ where
                         symbol: symbol.clone(),
                         network: payment_spec.network.clone()
                     })?;
+
+                (symbol, decimals)
+            }
+            PaymentAsset::Unknown(symbol) => {
+                let decimals_opt = self.db.get_symbol_decimals(&payment_spec.network, &symbol).await?;
+
+                let Some(decimals) = decimals_opt else {
+                    if !self.db.chain_exists(&payment_spec.network).await? {
+                        return Err(InvoiceCreationError::NetworkNotFound(payment_spec.network))
+                    }
+
+                    return Err(InvoiceCreationError::TokenNotFound {
+                        symbol,
+                        network: payment_spec.network
+                    })
+                };
 
                 (symbol, decimals)
             }
@@ -251,9 +265,9 @@ impl<D, E> NeckoCore<D, E> {
     pub fn parse_u256_as_string(&self, network: &str, value: U256, decimals: u8) -> Result<String, UnitConversionError> {
         let worker = self.workers.get(network)
             .ok_or_else(|| UnitConversionError::WorkerNotInitialized(network.to_string()))?;
-        
+
         let res = worker.adapter.parse_u256_as_string(value, decimals)?;
-        
+
         Ok(res)
     }
 

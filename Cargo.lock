@@ -2896,7 +2896,7 @@ dependencies = [
 
 [[package]]
 name = "necko3-blockchain"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "alloy",
  "async-trait",
@@ -2912,7 +2912,7 @@ dependencies = [
 
 [[package]]
 name = "necko3-core"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "alloy-primitives",
  "chrono",
@@ -2934,7 +2934,7 @@ dependencies = [
 
 [[package]]
 name = "necko3-database"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "alloy-primitives",
  "arc-swap",
@@ -2953,7 +2953,7 @@ dependencies = [
 
 [[package]]
 name = "necko3-types"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "alloy-primitives",
  "chrono",

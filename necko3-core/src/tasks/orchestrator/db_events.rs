@@ -65,9 +65,7 @@ impl<D: DatabaseExt> NeckoOrchestrator<D> {
             DbEvent::PaymentUpserted { payment_id, payment, is_new_payment } => {
                 self.handle_payment_upsert(payment_id, payment, is_new_payment).await;
             }
-            DbEvent::PaymentStatusUpdated { payment_id, new_status } => {
-                self.handle_payment_status_updated(payment_id, new_status).await;
-            }
+            DbEvent::PaymentStatusUpdated { .. } => {} // skip
             DbEvent::PaymentBlockUpdated { .. } => {} // skip
 
             // let webhook dispatcher handle this
@@ -428,21 +426,6 @@ impl<D: DatabaseExt> NeckoOrchestrator<D> {
         }
     }
 
-    async fn handle_payment_status_updated(
-        &self,
-        payment_id: Uuid,
-        new_status: PaymentStatus,
-    ) {
-        let PaymentStatus::Cancelled = new_status else { return; };
-
-        if let Err(e) = self.core_event_tx.send(
-            NeckoEvent::Ext(ExternalEvent::PaymentCancelled {
-                payment_id,
-            })).await {
-            warn!(error = %e, "Failed to send ExternalEvent::PaymentCancelled event");
-        }
-    }
-
     async fn handle_webhook_status_updated(
         &self,
         webhook_id: Uuid,
@@ -469,7 +452,7 @@ impl<D: DatabaseExt> NeckoOrchestrator<D> {
         };
 
         let event = match new_status {
-            WebhookStatus::Sent => {
+            WebhookStatus::Delivered => {
                 ExternalEvent::WebhookDelivered {
                     webhook_id,
                     invoice_id: webhook_data.invoice_id,
@@ -484,11 +467,6 @@ impl<D: DatabaseExt> NeckoOrchestrator<D> {
                     attempt: webhook_data.attempts,
                     max_attempts: webhook_data.max_retries,
                     url: webhook_data.url,
-                }
-            }
-            WebhookStatus::Cancelled => {
-                ExternalEvent::WebhookCancelled {
-                    webhook_id
                 }
             }
             _ => { return; } // :D

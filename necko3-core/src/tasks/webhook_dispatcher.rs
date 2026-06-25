@@ -159,7 +159,7 @@ async fn process_webhook<D: WebhookStore>(
     match result {
         Ok(res) if res.status().is_success() => {
             info!(status = %res.status(), "Webhook sent successfully");
-            db.update_webhook_status(job.id, WebhookStatus::Sent).await?;
+            db.update_webhook_status(job.id, WebhookStatus::Delivered).await?;
         }
         Ok(res) => {
             let status = res.status();

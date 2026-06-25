@@ -19,7 +19,7 @@ pub enum InvoiceCreationError {
     #[error("Worker for network '{0}' is not initialized")]
     WorkerNotInitialized(String),
 
-    #[error("Missing XPUB for network '{0}'. Cannot generate new addresses.")]
+    #[error("Missing XPUB for network '{0}'. Cannot generate new addresses")]
     MissingXpub(String),
 
     #[error("Failed to parse or format units: {0}")]

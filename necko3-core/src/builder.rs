@@ -27,6 +27,9 @@ pub struct NeckoCoreBuilder<D, E = CoreEvent> {
     channel_buffer: usize,
     janitor_interval: Duration,
     webhook_config: WebhookDispatcherConfig,
+
+    webhook_dispatcher_enabled: bool,
+    janitor_service_enabled: bool,
 }
 
 impl Default for NeckoCoreBuilder<InMemoryAdapter, CoreEvent> {
@@ -39,6 +42,9 @@ impl Default for NeckoCoreBuilder<InMemoryAdapter, CoreEvent> {
             channel_buffer: 1000,
             janitor_interval: Duration::from_secs(30),
             webhook_config: WebhookDispatcherConfig::default(),
+
+            webhook_dispatcher_enabled: true,
+            janitor_service_enabled: true,
         }
     }
 }
@@ -73,6 +79,8 @@ where
             channel_buffer: self.channel_buffer,
             janitor_interval: self.janitor_interval,
             webhook_config: self.webhook_config,
+            webhook_dispatcher_enabled: self.webhook_dispatcher_enabled,
+            janitor_service_enabled: self.janitor_service_enabled,
         }
     }
 
@@ -83,6 +91,8 @@ where
             channel_buffer: self.channel_buffer,
             janitor_interval: self.janitor_interval,
             webhook_config: self.webhook_config,
+            webhook_dispatcher_enabled: self.webhook_dispatcher_enabled,
+            janitor_service_enabled: self.janitor_service_enabled,
         }
     }
 
@@ -98,6 +108,16 @@ where
 
     pub fn with_webhook_config(mut self, webhook_config: WebhookDispatcherConfig) -> Self {
         self.webhook_config = webhook_config;
+        self
+    }
+
+    pub fn enable_webhook_dispatcher(mut self, enabled: bool) -> Self {
+        self.webhook_dispatcher_enabled = enabled;
+        self
+    }
+
+    pub fn enable_janitor_service(mut self, enabled: bool) -> Self {
+        self.janitor_service_enabled = enabled;
         self
     }
 }
@@ -120,16 +140,24 @@ where
 
         let orchestrator = NeckoOrchestrator::new(
             db.clone(), db_event_rx, chain_event_tx, chain_event_rx, core_event_tx, workers);
-        let janitor = NeckoJanitor::new(db.clone(), self.janitor_interval);
-        let webhook_dispatcher = NeckoWebhookDispatcher::new(
-            db, self.webhook_config.interval, self.webhook_config.webhooks_selection_limit,
-            self.webhook_config.concurrency_limit);
+
+        if self.janitor_service_enabled {
+            let janitor = NeckoJanitor::new(db.clone(), self.janitor_interval);
+
+            tokio::spawn(async move { janitor.run().await; });
+        }
+
+        if self.webhook_dispatcher_enabled {
+            let webhook_dispatcher = NeckoWebhookDispatcher::new(
+                db, self.webhook_config.interval, self.webhook_config.webhooks_selection_limit,
+                self.webhook_config.concurrency_limit);
+
+            tokio::spawn(async move { webhook_dispatcher.run().await; });
+        }
 
         let (ready_tx, ready_rx) = oneshot::channel();
 
         tokio::spawn(async move { orchestrator.run(ready_tx).await; });
-        tokio::spawn(async move { janitor.run().await; });
-        tokio::spawn(async move { webhook_dispatcher.run().await; });
 
         let core_listener = core.clone();
         tokio::spawn(async move {

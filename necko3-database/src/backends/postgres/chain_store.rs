@@ -4,7 +4,6 @@ use async_trait::async_trait;
 use necko3_types::{ChainData, PartialChainUpdate};
 use std::collections::HashSet;
 use crate::error::{DbError, DbResult};
-use crate::traits::chain::DbChainId;
 
 #[async_trait]
 impl ChainStore for PostgresAdapter {
@@ -42,14 +41,14 @@ impl ChainStore for PostgresAdapter {
         row.map(Self::map_row_to_chain).transpose()
     }
 
-    async fn add_chain(&self, chain_config: &ChainData) -> DbResult<DbChainId> {
-        let id: i32 = sqlx::query_scalar(
+    async fn add_chain(&self, chain_config: &ChainData) -> DbResult<ChainData> {
+        let row = sqlx::query(
             r#"INSERT INTO chains
                     (name, rpc_urls, chain_type, xpub, native_symbol, decimals,
                      last_processed_block, block_lag, required_confirmations, active, logo_url,
                      watch_addresses, safe_lag)
                     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
-                    RETURNING id"#,
+                    RETURNING *"#,
         )
             .bind(&chain_config.name)
             .bind(&chain_config.rpc_urls)
@@ -68,7 +67,7 @@ impl ChainStore for PostgresAdapter {
             .fetch_one(&self.pool)
             .await?;
 
-        Ok(id)
+        Self::map_row_to_chain(row)
     }
 
     async fn remove_chain(&self, chain_name: &str) -> DbResult<ChainData> {

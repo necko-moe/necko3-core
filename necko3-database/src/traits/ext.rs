@@ -155,11 +155,6 @@ pub trait DatabaseExt: DatabaseStore {
         
         Ok(skipped)
     }
-    
-    async fn cancel_payment(&self, payment_id: Uuid) -> DbResult<()> {
-        self.update_payment_status(payment_id, PaymentStatus::Cancelled).await?;
-        Ok(())
-    }
 
     // webhook
     async fn create_webhook_job(&self, invoice_id: Uuid, event: &WebhookEvent) -> DbResult<()> {
@@ -188,11 +183,6 @@ pub trait DatabaseExt: DatabaseStore {
         };
 
         self.add_webhook(&webhook).await?;
-        Ok(())
-    }
-
-    async fn cancel_webhook(&self, webhook_id: Uuid) -> DbResult<()> {
-        self.update_webhook_status(webhook_id, WebhookStatus::Cancelled).await?;
         Ok(())
     }
 }

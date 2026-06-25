@@ -9,7 +9,7 @@ pub trait ChainStore: Sync + Send {
     async fn get_chains(&self) -> DbResult<Vec<ChainData>>;
     async fn get_chain(&self, chain_name: &str) -> DbResult<Option<ChainData>>;
     async fn get_chain_by_id(&self, id: i32) -> DbResult<Option<ChainData>>;
-    async fn add_chain(&self, chain_config: &ChainData) -> DbResult<DbChainId>;
+    async fn add_chain(&self, chain_config: &ChainData) -> DbResult<ChainData>;
     async fn remove_chain(&self, chain_name: &str) -> DbResult<ChainData>;
     async fn chain_exists(&self, chain_name: &str) -> DbResult<bool>;
     async fn update_chain_partial(&self, chain_name: &str, chain_update: &PartialChainUpdate) -> DbResult<()>;
