@@ -11,6 +11,7 @@ members = [
 version = "0.2.3"
 authors = ["necko1"]
 edition = "2024"
+rust-version = "1.94.1"
 
 [workspace.dependencies]
 tokio = { version = "1", features = ["sync"] }
