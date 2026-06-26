@@ -1,5 +1,5 @@
 use crate::backends::postgres::PostgresAdapter;
-use crate::error::{DbError, DbResult};
+use crate::error::{DbError, DbQueryError, DbResult};
 use crate::traits::{ChainStore, TokenStore};
 use async_trait::async_trait;
 use necko3_types::TokenData;
@@ -119,7 +119,32 @@ impl TokenStore for PostgresAdapter {
             .bind(token_config.decimals as i16)
             .bind(&token_config.logo_url)
             .fetch_optional(&self.pool)
-            .await?;
+            .await
+            .map_err(|e| {
+                let db_error = match &e {
+                    sqlx::Error::Database(db_err) if db_err.is_unique_violation() => {
+                        db_err.constraint().and_then(|constraint| match constraint {
+                            "unique_token_per_chain" => Some(DbError::Sqlx(
+                                DbQueryError::TokenSymbolAlreadyExists {
+                                    symbol: token_config.symbol.to_string(),
+                                    chain: chain_name.to_string(),
+                                }
+                            )),
+                            "uq_token_contract_address" => Some(DbError::Sqlx(
+                                DbQueryError::TokenContractConflict(token_config.contract.to_string())
+                            )),
+                            _ => None,
+                        })
+                    }
+
+                    _ => None,
+                };
+
+                match db_error {
+                    Some(e) => e,
+                    None => DbError::from(e)
+                }
+            })?;
 
         let Some(row) = row_opt else {
             return Err(DbError::NotFound {

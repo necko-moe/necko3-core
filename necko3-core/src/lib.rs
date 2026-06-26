@@ -13,6 +13,7 @@ pub mod prelude {
 
         pub use necko3_database::decorators::*;
 
+        pub use necko3_database::traits::DatabaseAdapter;
         pub use necko3_database::traits::DatabaseExt;
         pub use necko3_database::error::*;
     }

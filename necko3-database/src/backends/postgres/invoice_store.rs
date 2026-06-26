@@ -6,7 +6,7 @@ use sqlx::types::BigDecimal;
 use uuid::Uuid;
 use necko3_types::{Invoice, InvoiceStatus};
 use crate::backends::postgres::PostgresAdapter;
-use crate::error::{DbError, DbResult};
+use crate::error::{DbError, DbQueryError, DbResult};
 use crate::model::{ExpiredInvoiceInfo, InvoiceFilter, PaginatedVec};
 use crate::traits::InvoiceStore;
 
@@ -125,7 +125,13 @@ impl InvoiceStore for PostgresAdapter {
             .bind(&invoice.webhook_secret)
             .bind(invoice.webhook_max_retries.map(|x| x as i32))
             .execute(&self.pool)
-            .await?;
+            .await
+            .map_err(|e| match e {
+                sqlx::Error::Database(db_err) if db_err.is_unique_violation() => {
+                    DbError::Sqlx(DbQueryError::InvoiceAddressConflict(invoice.address.to_string()))
+                }
+                other => DbError::from(other),
+            })?;
 
         Ok(())
     }

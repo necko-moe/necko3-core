@@ -4,7 +4,7 @@ use uuid::Uuid;
 #[derive(Debug, Error)]
 pub enum DbError {
     #[error("Database driver error: {0}")]
-    Sqlx(#[from] sqlx::Error),
+    Sqlx(#[from] DbQueryError),
 
     #[error("Failed to run migrations: {0}")]
     Migration(#[from] sqlx::migrate::MigrateError),
@@ -14,6 +14,30 @@ pub enum DbError {
 
     #[error("Corrupted data in DB: {0}")]
     DataCorruption(String),
+}
+
+#[derive(Debug, Error)]
+pub enum DbQueryError {
+    #[error("Chain with name '{0}' already exists")]
+    ChainAlreadyExists(String),
+
+    #[error("Token with symbol '{symbol}' already exists on chain '{chain}'")]
+    TokenSymbolAlreadyExists { symbol: String, chain: String },
+
+    #[error("Token with contract address '{0}' already exists")]
+    TokenContractConflict(String),
+
+    #[error("Invoice with address '{0}' already exists")]
+    InvoiceAddressConflict(String),
+
+    #[error("Database driver error: {0}")]
+    Driver(sqlx::Error),
+}
+
+impl From<sqlx::Error> for DbError {
+    fn from(err: sqlx::Error) -> Self {
+        DbError::Sqlx(DbQueryError::Driver(err))
+    }
 }
 
 #[derive(Debug, Error)]

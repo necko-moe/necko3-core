@@ -10,8 +10,8 @@ impl XPubStore for PostgresAdapter {
             r#"INSERT INTO xpub_states (xpub, last_used_index)
                    VALUES ($1, 0)
                    ON CONFLICT (xpub)
-                   DO UPDATE SET last_used_index = last_used_index + 1
-                   RETURNING last_used_index;"#
+                   DO UPDATE SET last_used_index = xpub_states.last_used_index + 1
+                   RETURNING xpub_states.last_used_index;"#
         )
             .bind(xpub)
             .fetch_one(&self.pool)

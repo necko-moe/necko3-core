@@ -35,6 +35,7 @@ impl DatabaseAdapter for PostgresAdapter {
             .await?;
 
         sqlx::migrate!("./migrations/postgres")
+            .dangerous_set_table_name("_sqlx_migrations_core")
             .run(&pool)
             .await?;
 

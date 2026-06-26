@@ -143,7 +143,7 @@ impl PaymentStore for PostgresAdapter {
         let row = sqlx::query(
             r#"INSERT INTO payments ("from", "to", network, tx_hash, amount_raw,
                       block_number, block_hash, status, log_index, token)
-                   VALUES ($1, $2, $3, $4, $5, $6, $7, 'Confirming', $9, $10)
+                   VALUES ($1, $2, $3, $4, $5, $6, $7, 'Confirming', $8, $9)
                    ON CONFLICT (tx_hash, log_index, network)
                    DO UPDATE SET block_number = excluded.block_number,
                                  block_hash = excluded.block_hash,

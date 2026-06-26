@@ -7,7 +7,7 @@ pub use crate::traits::webhook::WebhookStore;
 pub use crate::traits::xpub::XPubStore;
 pub use crate::traits::indexed_blocks::IndexedBlocksStore;
 
-pub use async_trait::async_trait;
+use async_trait::async_trait;
 use crate::error::DbResult;
 
 pub mod chain;

@@ -3,7 +3,7 @@ use crate::traits::*;
 use async_trait::async_trait;
 use necko3_types::{ChainData, PartialChainUpdate};
 use std::collections::HashSet;
-use crate::error::{DbError, DbResult};
+use crate::error::{DbError, DbQueryError, DbResult};
 
 #[async_trait]
 impl ChainStore for PostgresAdapter {
@@ -65,7 +65,13 @@ impl ChainStore for PostgresAdapter {
                 .collect::<Vec<_>>())
             .bind(chain_config.safe_lag as i16)
             .fetch_one(&self.pool)
-            .await?;
+            .await
+            .map_err(|e| match e {
+                sqlx::Error::Database(db_err) if db_err.is_unique_violation() => {
+                    DbError::Sqlx(DbQueryError::ChainAlreadyExists(chain_config.name.to_string()))
+                }
+                other => DbError::from(other),
+            })?;
 
         Self::map_row_to_chain(row)
     }
