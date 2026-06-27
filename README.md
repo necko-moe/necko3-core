@@ -322,24 +322,29 @@ async fn main() -> anyhow::Result<()> {
 
 ## Contributing
 
-I'd be happy to see any feedback.  
-
-Found a bug? [Open an Issue](https://github.com/necko-moe/necko3-core/issues/new).  
-
-Want to add a feature? Fork it and send a PR.
+I'd be happy to see any feedback.<br />
+Found a bug? <a href=https://github.com/necko-moe/necko3-backend/issues/new>Open an Issue</a>.<br />
+Want to add a feature? Fork it and send a PR
+(or just <a href=https://github.com/necko-moe/necko3-backend/issues/new>Open an Issue</a> and write whatever you want)
 
 ## License
 
 The project and all repositories are distributed under the **MIT License**. Feel free to use, modify, and distribute <3
 
-***
+* * *
 
 <div align="center">
   <h1>SUPPORT PROJECT</h1>
-  <p>Want to make necko1 employed or donate enough for a Triple Whopper? Contact me -> <a href=https://t.me/everyonehio>Telegram</a> or <a href="mailto:meow@necko.moe">Mail me</a> (I rarely check that). I don't accept direct card transfers, just so you know</p>
+  <p>Want to make necko1 employed or donate enough for a Triple Whopper? Contact me -> <a href=https://t.me/everyonehio>Telegram</a> or <a href="mailto:meow@necko.moe">Mail me</a> (I rarely check that)</p>
+  <p>I don't accept direct card transfers, but you can feed me some stablecoins:</p>
+    <ul style="list-style-type: none; padding: 0;">
+      <li><b>USDT (TRC20):</b> <code>THcVNoNu3oaLfssbWbNxXK5rUsLfpPM35D</code></li>
+      <li><b>Anything in Ethereum / ERC-20:</b> <code>0x97D596eA81C09aC76a89D495b7bACa7660eb4c73</code></li>
+      <li><b>TON:</b> <code>UQDRX9xv1uMxUMe9kkeidWGDkORI4gDx076QIaejtQUjI</code></li>
+    </ul>
   <p>
     Broke but still want to help?
-    You can just <a href="https://github.com/necko-moe/necko3-core/stargazers"><b>⭐ Star this repo</b></a> to show your love. It really helps!
+    You can just <a href="https://github.com/necko-moe/necko3-backend/stargazers"><b>⭐ Star this repo</b></a> to show your love. It really helps!
   </p>
   <a href="https://github.com/necko-moe">
     <img src=".github/static/necko3-2-200.png" alt="necko3 support banner" width="1024"/>
