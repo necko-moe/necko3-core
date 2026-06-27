@@ -12,6 +12,9 @@ version = "0.2.3"
 authors = ["necko1"]
 edition = "2024"
 rust-version = "1.94.1"
+readme = "README.md"
+license = "MIT"
+repository = "https://github.com/necko-moe/necko3-core"
 
 [workspace.dependencies]
 tokio = { version = "1", features = ["sync"] }
@@ -20,3 +23,7 @@ tracing = "0.1"
 thiserror = "2"
 
 serde = { version = "1", features = ["derive"] }
+
+necko3-types = { version = "0.2.3", path = "necko3-types" }
+necko3-database = { version = "0.2.3", path = "necko3-database" }
+necko3-blockchain = { version = "0.2.3", path = "necko3-blockchain" }

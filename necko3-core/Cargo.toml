@@ -1,15 +1,17 @@
 [package]
 name = "necko3-core"
+description = "The interface. Contains `NeckoCore`, `NeckoCoreBuilder`, the central Orchestrator event loops, and background tasks (Janitor & Webhook Dispatcher)."
 version.workspace = true
 authors.workspace = true
 edition.workspace = true
+readme.workspace = true
+license.workspace = true
+repository.workspace = true
 
 [dependencies]
 tokio.workspace = true
 tracing.workspace = true
 thiserror.workspace = true
-
-#anyhow = "1"
 
 reqwest = { version = "0.13", features = ["json"] }
 chrono = { version = "0.4", features = ["serde"] }
@@ -24,6 +26,6 @@ alloy-primitives = { version = "1.6", features = ["serde"] }
 uuid = { version = "1.23", features = ["v4", "serde"] }
 dashmap = "6.2"
 
-necko3-types = { path = "../necko3-types" }
-necko3-blockchain = { path = "../necko3-blockchain" }
-necko3-database = { path = "../necko3-database" }
+necko3-types.workspace = true
+necko3-blockchain.workspace = true
+necko3-database.workspace = true

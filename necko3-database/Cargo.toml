@@ -1,8 +1,12 @@
 [package]
 name = "necko3-database"
+description = "Database traits (`DatabaseStore`, `DatabaseExt`), implementations (`PostgresAdapter`, `InMemoryAdapter`), and decorators (`CachedDb`, `NotifyingDb`)."
 version.workspace = true
 authors.workspace = true
 edition.workspace = true
+readme.workspace = true
+license.workspace = true
+repository.workspace = true
 
 [dependencies]
 tokio.workspace = true
@@ -24,4 +28,4 @@ serde_json = "1"
 
 alloy-primitives = { version = "1", features = ["std", "serde"] }
 
-necko3-types = { path = "../necko3-types" }
+necko3-types.workspace = true

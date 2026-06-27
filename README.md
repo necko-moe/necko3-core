@@ -4,6 +4,12 @@
   </a>
   <h1>necko3-core</h1>
   <p align="center">
+   <a href="https://crates.io/crates/necko3-core">
+      <img src="https://img.shields.io/crates/v/necko3-core.svg?style=flat-square" alt="Crates.io">
+    </a>
+    <a href="https://docs.rs/necko3-core">
+      <img src="https://img.shields.io/docsrs/necko3-core?style=flat-square" alt="docs.rs">
+    </a>
     <a href="https://github.com/necko-moe/necko3-core/actions">
       <img src="https://img.shields.io/github/actions/workflow/status/necko-moe/necko3-core/ci.yml?branch=main&style=flat-square" alt="CI Status">
     </a>
@@ -103,7 +109,7 @@ Add the necko3-core interface crate to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-necko3-core = { git = "https://github.com/necko-moe/necko3-core" }
+necko3-core = "0.2"
 ```
 
 ### Creating indexer and Tracking addresses

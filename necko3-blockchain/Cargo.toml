@@ -1,8 +1,12 @@
 [package]
 name = "necko3-blockchain"
+description = "Chain interaction (`BlockchainAdapter`, `BlockchainWorker`). Currently powers the `EvmBlockchain` with block tracking, reorg protection, log filtering, and RPC rotation."
 version.workspace = true
 authors.workspace = true
 edition.workspace = true
+readme.workspace = true
+license.workspace = true
+repository.workspace = true
 
 [dependencies]
 tokio.workspace = true
@@ -18,4 +22,4 @@ reqwest = "0.13.4"
 async-trait = "0.1"
 url = "2.5"
 
-necko3-types = { path = "../necko3-types" }
+necko3-types.workspace = true

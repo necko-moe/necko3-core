@@ -1,8 +1,12 @@
 [package]
 name = "necko3-types"
+description = "Pure domain models: `Invoice`, `Payment`, `ChainData`, `TokenData`, `WebhookEvent`, etc."
 version.workspace = true
 authors.workspace = true
 edition.workspace = true
+readme.workspace = true
+license.workspace = true
+repository.workspace = true
 
 [dependencies]
 serde.workspace = true
