@@ -1,0 +1,18 @@
+[package]
+name = "necko3-types"
+description = "Pure domain models: `Invoice`, `Payment`, `ChainData`, `TokenData`, `WebhookEvent`, etc."
+version.workspace = true
+authors.workspace = true
+edition.workspace = true
+readme.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+serde.workspace = true
+strum = { version = "0.28", features = ["derive"] }
+
+uuid = { version = "1.23", features = ["v4", "serde"] }
+chrono = { version = "0.4", features = ["serde"] }
+
+alloy-primitives = { version = "1.6", features = ["serde"] }
