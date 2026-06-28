@@ -164,7 +164,7 @@ struct PaymentDetails {
 
 impl<D: DatabaseExt> NeckoOrchestrator<D> {
     async fn finalize_payment(&self, details: PaymentDetails) {
-        let _info_opt = match self.db.finalize_payment(details.payment_id).await {
+        let info_opt = match self.db.finalize_payment(details.payment_id).await {
             Ok(Some(info)) => Some(info),
             Ok(None) => {
                 debug!(payment_id = %details.payment_id, invoice_address = details.address_to,
@@ -177,6 +177,19 @@ impl<D: DatabaseExt> NeckoOrchestrator<D> {
             }
         };
 
+        if let Some(info) = info_opt {
+            let webhook_job = WebhookEvent::TxConfirmed {
+                invoice_id: info.invoice_id,
+                tx_hash: details.tx_hash.clone(),
+                confirmations: details.confirmed_after,
+            };
+
+            if let Err(e) = self.db.create_webhook_job(info.invoice_id, &webhook_job).await {
+                warn!(error = %e, invoice_id = %info.invoice_id,
+                    "Failed to create TxConfirmed webhook job");
+            }
+        }
+        
         if let Err(e) = self.core_event_tx.send(
             NeckoEvent::Core(CoreEvent::TransactionConfirmed {
             db_transaction_id: details.payment_id,

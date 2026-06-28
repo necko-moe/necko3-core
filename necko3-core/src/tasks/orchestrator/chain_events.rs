@@ -1,8 +1,8 @@
 use alloy_primitives::BlockNumber;
-use tracing::{error, warn};
+use tracing::{debug, error, warn};
 use necko3_database::traits::DatabaseExt;
 use necko3_types::blockchain::ChainEvent;
-use necko3_types::{PaymentStatus, UpsertPayment};
+use necko3_types::{PaymentStatus, UpsertPayment, WebhookEvent};
 use crate::tasks::orchestrator::{NeckoOrchestrator, PaymentDetails};
 use crate::types::{CoreEvent, NeckoEvent};
 
@@ -16,20 +16,18 @@ impl<D: DatabaseExt> NeckoOrchestrator<D> {
                 let new_payment = UpsertPayment {
                     from,
                     to,
-                    network: chain_name.clone(),
+                    network: chain_name,
                     asset,
-                    tx_hash: tx_hash.clone(),
+                    tx_hash,
                     amount_raw,
                     amount_human,
                     block_number,
-                    block_hash: block_hash.clone(),
+                    block_hash,
                     log_index,
                     required_confirmations,
                 };
 
-                if let Err(e) = self.db.upsert_payment(&new_payment).await {
-                    warn!(error = %e, "Failed to upsert payment");
-                }
+                self.handle_payment_detected(new_payment).await;
             }
             ChainEvent::PaymentReorged { tx_hash, new_block_number, new_block_hash, .. } => {
                 self.handle_payment_reorged(tx_hash, new_block_number, new_block_hash).await;
@@ -56,7 +54,43 @@ impl<D: DatabaseExt> NeckoOrchestrator<D> {
             }
         }
     }
-    
+
+    async fn handle_payment_detected(
+        &self,
+        payment: UpsertPayment,
+    ) {
+        if let Err(e) = self.db.upsert_payment(&payment).await {
+            warn!(error = %e, "Failed to upsert payment");
+        }
+
+        let invoice = match self.db.get_invoice_by_address(&payment.to).await {
+            Ok(Some(info)) => info,
+            Ok(None) => {
+                debug!(payment_address = %payment.to,
+                            "Cannot find invoice for this payment address");
+
+                return;
+            }
+            Err(e) => {
+                warn!(error = %e, address = %payment.to, "Failed to get invoice by address");
+
+                return;
+            }
+        };
+
+        let webhook_job = WebhookEvent::TxDetected {
+            invoice_id: invoice.id,
+            tx_hash: payment.tx_hash,
+            amount: payment.amount_human,
+            currency: payment.asset.to_symbol(),
+        };
+
+        if let Err(e) = self.db.create_webhook_job(invoice.id, &webhook_job).await {
+            warn!(error = %e, invoice_id = %invoice.id,
+                "Failed to create TxDetected webhook job");
+        }
+    }
+
     async fn handle_payment_reorged(
         &self,
         tx_hash: String,
