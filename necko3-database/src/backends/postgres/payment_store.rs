@@ -108,7 +108,7 @@ impl PaymentStore for PostgresAdapter {
             .transpose()
     }
 
-    async fn get_payment_by_tx_hash(&self, tx_hash: String) -> DbResult<Option<Payment>> {
+    async fn get_payment_by_tx_hash(&self, tx_hash: &str) -> DbResult<Option<Payment>> {
         sqlx::query(
             r#"SELECT id, "from", "to", network, tx_hash, token, amount_raw::TEXT,
                        block_number, block_hash::TEXT, status, created_at, log_index
@@ -133,7 +133,7 @@ impl PaymentStore for PostgresAdapter {
         rows.into_iter().map(Self::map_row_to_payment).collect()
     }
 
-    async fn upsert_payment(&self, payment: &UpsertPayment) -> DbResult<(Uuid, bool)> {
+    async fn upsert_payment(&self, payment: UpsertPayment) -> DbResult<(Uuid, bool)> {
         let amount_bd = BigDecimal::from_str(&payment.amount_raw.to_string())
             .map_err(|e| DbError::DataCorruption(
                 format!("Failed to parse amount_raw ({}) as BigDecimal: {}", payment.amount_raw, e)))?;
@@ -187,7 +187,7 @@ impl PaymentStore for PostgresAdapter {
         Ok(())
     }
 
-    async fn update_payment_block(&self, payment_id: Uuid, block_num: u64, block_hash: String) -> DbResult<()> {
+    async fn update_payment_block(&self, payment_id: Uuid, block_num: u64, block_hash: &str) -> DbResult<()> {
         let res = sqlx::query(
             "UPDATE payments SET block_number = $1, block_hash = $2 WHERE id = $3"
         )

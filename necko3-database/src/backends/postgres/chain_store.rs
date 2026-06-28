@@ -41,7 +41,7 @@ impl ChainStore for PostgresAdapter {
         row.map(Self::map_row_to_chain).transpose()
     }
 
-    async fn add_chain(&self, chain_config: &ChainData) -> DbResult<ChainData> {
+    async fn add_chain(&self, chain_config: ChainData) -> DbResult<ChainData> {
         let row = sqlx::query(
             r#"INSERT INTO chains
                     (name, rpc_urls, chain_type, xpub, native_symbol, decimals,
@@ -105,8 +105,8 @@ impl ChainStore for PostgresAdapter {
         Ok(exists)
     }
 
-    async fn update_chain_partial(&self, chain_name: &str, chain_update: &PartialChainUpdate) -> DbResult<()> {
-        let result = sqlx::query(
+    async fn update_chain_partial(&self, chain_name: &str, chain_update: PartialChainUpdate) -> DbResult<ChainData> {
+        let row_opt = sqlx::query(
             r#"UPDATE chains SET
                        rpc_urls = COALESCE($1, rpc_urls),
                        last_processed_block = COALESCE($2, last_processed_block),
@@ -116,7 +116,8 @@ impl ChainStore for PostgresAdapter {
                        active = COALESCE($6, active),
                        logo_url = COALESCE($7, logo_url),
                        safe_lag = COALESCE($8, safe_lag)
-                   WHERE name = $9"#
+                   WHERE name = $9
+                   RETURNING *"#,
         )
             .bind(chain_update.rpc_urls.clone())
             .bind(chain_update.last_processed_block.map(|x| x as i64))
@@ -127,17 +128,17 @@ impl ChainStore for PostgresAdapter {
             .bind(chain_update.logo_url.clone())
             .bind(chain_update.safe_lag.map(|x| x as i16))
             .bind(chain_name)
-            .execute(&self.pool)
+            .fetch_optional(&self.pool)
             .await?;
 
-        if result.rows_affected() == 0 {
+        let Some(row) = row_opt else {
             return Err(DbError::NotFound {
                 entity: "Chain",
                 id: chain_name.to_string(),
             });
-        }
+        };
 
-        Ok(())
+        Self::map_row_to_chain(row)
     }
 
     async fn update_chain_active(&self, chain_name: &str, active: bool) -> DbResult<()> {
@@ -178,7 +179,7 @@ impl ChainStore for PostgresAdapter {
         Ok(())
     }
 
-    async fn add_watch_address(&self, chain_name: &str, address: String) -> DbResult<bool> {
+    async fn add_watch_address(&self, chain_name: &str, address: &str) -> DbResult<bool> {
         let result = sqlx::query(
             r#"UPDATE chains SET watch_addresses = ARRAY_APPEND(watch_addresses, $1)
                    WHERE name = $2 AND NOT ($1 = ANY(watch_addresses))"#

@@ -184,7 +184,7 @@ impl<D: DatabaseExt> NeckoOrchestrator<D> {
                 confirmations: details.confirmed_after,
             };
 
-            if let Err(e) = self.db.create_webhook_job(info.invoice_id, &webhook_job).await {
+            if let Err(e) = self.db.create_webhook_job(info.invoice_id, webhook_job).await {
                 warn!(error = %e, invoice_id = %info.invoice_id,
                     "Failed to create TxConfirmed webhook job");
             }
@@ -235,7 +235,7 @@ impl<D: DatabaseExt> NeckoOrchestrator<D> {
             InvoiceStatus::Pending => { return; }  // :D
         };
 
-        if let Err(e) = self.db.create_webhook_job(invoice_id, &webhook).await {
+        if let Err(e) = self.db.create_webhook_job(invoice_id, webhook).await {
             warn!(error = %e, "Failed to create webhook job");
         }
 

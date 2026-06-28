@@ -104,7 +104,7 @@ impl TokenStore for PostgresAdapter {
         })
     }
 
-    async fn add_token(&self, chain_name: &str, token_config: &TokenData) -> DbResult<TokenData> {
+    async fn add_token(&self, chain_name: &str, token_config: TokenData) -> DbResult<TokenData> {
         let row_opt = sqlx::query(
             r#"INSERT INTO tokens
                (chain_id, symbol, contract_address, decimals, logo_url)

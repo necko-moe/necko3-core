@@ -193,13 +193,13 @@ impl<D: DatabaseExt> ChainStore for CachedDb<D> {
         Ok(chains.into_iter().find(|c| c.id == id))
     }
 
-    async fn add_chain(&self, chain_config: &ChainData) -> DbResult<ChainData> {
+    async fn add_chain(&self, chain_config: ChainData) -> DbResult<ChainData> {
         let data = self.inner.add_chain(chain_config).await?;
 
         self.chains_cache.store(None);
 
         self.symbol_decimals
-            .insert((chain_config.name.clone(), chain_config.native_symbol.clone()), chain_config.decimals);
+            .insert((data.name.clone(), data.native_symbol.clone()), data.decimals);
 
         Ok(data)
     }
@@ -225,10 +225,12 @@ impl<D: DatabaseExt> ChainStore for CachedDb<D> {
         Ok(chains.into_iter().any(|c| c.name == chain_name))
     }
 
-    async fn update_chain_partial(&self, chain_name: &str, chain_update: &PartialChainUpdate) -> DbResult<()> {
-        self.inner.update_chain_partial(chain_name, chain_update).await?;
+    async fn update_chain_partial(&self, chain_name: &str, chain_update: PartialChainUpdate) -> DbResult<ChainData> {
+        let chain = self.inner.update_chain_partial(chain_name, chain_update).await?;
+        
         self.chains_cache.store(None);
-        Ok(())
+        
+        Ok(chain)
     }
 
     async fn update_chain_active(&self, chain_name: &str, active: bool) -> DbResult<()> {
@@ -243,15 +245,15 @@ impl<D: DatabaseExt> ChainStore for CachedDb<D> {
         Ok(())
     }
 
-    async fn add_watch_address(&self, chain_name: &str, address: String) -> DbResult<bool> {
-        if !self.inner.add_watch_address(chain_name, address.clone()).await? {
+    async fn add_watch_address(&self, chain_name: &str, address: &str) -> DbResult<bool> {
+        if !self.inner.add_watch_address(chain_name, address).await? {
             return Ok(false);
         }
 
         if let Some(mut watch_addresses) = self.watch_addresses_cache
             .get_mut(chain_name)
         {
-            watch_addresses.insert(address);
+            watch_addresses.insert(address.to_string());
         }
 
         Ok(true)
@@ -349,13 +351,13 @@ impl<D: DatabaseExt> TokenStore for CachedDb<D> {
         Ok(removed)
     }
 
-    async fn add_token(&self, chain_name: &str, token_config: &TokenData) -> DbResult<TokenData> {
+    async fn add_token(&self, chain_name: &str, token_config: TokenData) -> DbResult<TokenData> {
         let data = self.inner.add_token(chain_name, token_config).await?;
 
         self.invalidate_tokens_cache(chain_name).await?;
 
         self.symbol_decimals
-            .insert((chain_name.to_owned(), token_config.symbol.clone()), token_config.decimals);
+            .insert((chain_name.to_owned(), data.symbol.clone()), data.decimals);
 
         Ok(data)
     }
@@ -371,11 +373,11 @@ impl<D: DatabaseExt> InvoiceStore for CachedDb<D> {
         self.inner.get_invoice(invoice_id).await
     }
 
-    async fn add_invoice(&self, invoice: &Invoice) -> DbResult<()> {
+    async fn add_invoice(&self, invoice: Invoice) -> DbResult<Invoice> {
         self.inner.add_invoice(invoice).await
     }
 
-    async fn update_invoice_status(&self, invoice_id: Uuid, status: InvoiceStatus) -> DbResult<()> {
+    async fn update_invoice_status(&self, invoice_id: Uuid, status: InvoiceStatus) -> DbResult<Invoice> {
         self.inner.update_invoice_status(invoice_id, status).await
     }
 
@@ -402,7 +404,7 @@ impl<D: DatabaseExt> PaymentStore for CachedDb<D> {
         self.inner.get_payment(payment_id).await
     }
 
-    async fn get_payment_by_tx_hash(&self, tx_hash: String) -> DbResult<Option<Payment>> {
+    async fn get_payment_by_tx_hash(&self, tx_hash: &str) -> DbResult<Option<Payment>> {
         self.inner.get_payment_by_tx_hash(tx_hash).await
     }
 
@@ -410,7 +412,7 @@ impl<D: DatabaseExt> PaymentStore for CachedDb<D> {
         self.inner.get_payments_by_status(status).await
     }
 
-    async fn upsert_payment(&self, payment: &UpsertPayment) -> DbResult<(Uuid, bool)> {
+    async fn upsert_payment(&self, payment: UpsertPayment) -> DbResult<(Uuid, bool)> {
         self.inner.upsert_payment(payment).await
     }
 
@@ -418,7 +420,7 @@ impl<D: DatabaseExt> PaymentStore for CachedDb<D> {
         self.inner.update_payment_status(payment_id, status).await
     }
 
-    async fn update_payment_block(&self, payment_id: Uuid, block_num: u64, block_hash: String) -> DbResult<()> {
+    async fn update_payment_block(&self, payment_id: Uuid, block_num: u64, block_hash: &str) -> DbResult<()> {
         self.inner.update_payment_block(payment_id, block_num, block_hash).await
     }
 }
@@ -433,7 +435,7 @@ impl<D: DatabaseExt> WebhookStore for CachedDb<D> {
         self.inner.get_webhook(webhook_id).await
     }
 
-    async fn add_webhook(&self, webhook: &Webhook) -> DbResult<()> {
+    async fn add_webhook(&self, webhook: Webhook) -> DbResult<Webhook> {
         self.inner.add_webhook(webhook).await
     }
 

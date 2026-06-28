@@ -73,11 +73,11 @@ impl<D: DatabaseExt> ChainStore for NotifyingDb<D> {
         self.inner.get_chain_by_id(id).await
     }
 
-    async fn add_chain(&self, chain_config: &ChainData) -> DbResult<ChainData> {
-        let data = self.inner.add_chain(chain_config).await?;
+    async fn add_chain(&self, chain_config: ChainData) -> DbResult<ChainData> {
+        let data = self.inner.add_chain(chain_config.clone()).await?;
 
         let _ = self.tx.send(DbEvent::ChainAdded {
-            chain_data: chain_config.clone(),
+            chain_data: chain_config,
         }).await;
 
         Ok(data)
@@ -97,15 +97,15 @@ impl<D: DatabaseExt> ChainStore for NotifyingDb<D> {
         self.inner.chain_exists(chain_name).await
     }
 
-    async fn update_chain_partial(&self, chain_name: &str, chain_update: &PartialChainUpdate) -> DbResult<()> {
-        self.inner.update_chain_partial(chain_name, chain_update).await?;
+    async fn update_chain_partial(&self, chain_name: &str, chain_update: PartialChainUpdate) -> DbResult<ChainData> {
+        let chain = self.inner.update_chain_partial(chain_name, chain_update.clone()).await?;
 
         let _ = self.tx.send(DbEvent::ChainPartialUpdated {
             chain_name: chain_name.to_string(),
-            partial_update: chain_update.clone()
+            partial_update: chain_update
         }).await;
 
-        Ok(())
+        Ok(chain)
     }
 
     async fn update_chain_active(&self, chain_name: &str, active: bool) -> DbResult<()> {
@@ -130,12 +130,12 @@ impl<D: DatabaseExt> ChainStore for NotifyingDb<D> {
         Ok(())
     }
 
-    async fn add_watch_address(&self, chain_name: &str, address: String) -> DbResult<bool> {
-        let added = self.inner.add_watch_address(chain_name, address.clone()).await?;
+    async fn add_watch_address(&self, chain_name: &str, address: &str) -> DbResult<bool> {
+        let added = self.inner.add_watch_address(chain_name, address).await?;
 
         let _ = self.tx.send(DbEvent::ChainWatchAddressAdded {
             chain_name: chain_name.to_string(),
-            address
+            address: address.to_string()
         }).await;
 
         Ok(added)
@@ -197,12 +197,12 @@ impl<D: DatabaseExt> TokenStore for NotifyingDb<D> {
         Ok(token)
     }
 
-    async fn add_token(&self, chain_name: &str, token_config: &TokenData) -> DbResult<TokenData> {
-        let data = self.inner.add_token(chain_name, token_config).await?;
+    async fn add_token(&self, chain_name: &str, token_config: TokenData) -> DbResult<TokenData> {
+        let data = self.inner.add_token(chain_name, token_config.clone()).await?;
 
         let _ = self.tx.send(DbEvent::TokenAdded {
             chain_name: chain_name.to_string(),
-            token_data: token_config.clone(),
+            token_data: token_config,
         }).await;
 
         Ok(data)
@@ -219,25 +219,23 @@ impl<D: DatabaseExt> InvoiceStore for NotifyingDb<D> {
         self.inner.get_invoice(invoice_id).await
     }
 
-    async fn add_invoice(&self, invoice: &Invoice) -> DbResult<()> {
-        self.inner.add_invoice(invoice).await?;
+    async fn add_invoice(&self, invoice: Invoice) -> DbResult<Invoice> {
+        let inv = self.inner.add_invoice(invoice.clone()).await?;
 
-        let _ = self.tx.send(DbEvent::InvoiceAdded {
-            invoice: invoice.clone()
-        }).await;
+        let _ = self.tx.send(DbEvent::InvoiceAdded { invoice }).await;
 
-        Ok(())
+        Ok(inv)
     }
 
-    async fn update_invoice_status(&self, invoice_id: Uuid, status: InvoiceStatus) -> DbResult<()> {
-        self.inner.update_invoice_status(invoice_id, status).await?;
+    async fn update_invoice_status(&self, invoice_id: Uuid, status: InvoiceStatus) -> DbResult<Invoice> {
+        let invoice = self.inner.update_invoice_status(invoice_id, status).await?;
 
         let _ = self.tx.send(DbEvent::InvoiceStatusUpdated {
             invoice_id,
             new_status: status,
         }).await;
 
-        Ok(())
+        Ok(invoice)
     }
 
     async fn get_invoice_by_address(&self, address: &str) -> DbResult<Option<Invoice>> {
@@ -285,7 +283,7 @@ impl<D: DatabaseExt> PaymentStore for NotifyingDb<D> {
         self.inner.get_payment(payment_id).await
     }
 
-    async fn get_payment_by_tx_hash(&self, tx_hash: String) -> DbResult<Option<Payment>> {
+    async fn get_payment_by_tx_hash(&self, tx_hash: &str) -> DbResult<Option<Payment>> {
         self.inner.get_payment_by_tx_hash(tx_hash).await
     }
 
@@ -293,12 +291,12 @@ impl<D: DatabaseExt> PaymentStore for NotifyingDb<D> {
         self.inner.get_payments_by_status(status).await
     }
 
-    async fn upsert_payment(&self, payment: &UpsertPayment) -> DbResult<(Uuid, bool)> {
-        let (id, inserted) = self.inner.upsert_payment(payment).await?;
+    async fn upsert_payment(&self, payment: UpsertPayment) -> DbResult<(Uuid, bool)> {
+        let (id, inserted) = self.inner.upsert_payment(payment.clone()).await?;
 
         let _ = self.tx.send(DbEvent::PaymentUpserted {
             payment_id: id,
-            payment: payment.clone(),
+            payment,
             is_new_payment: inserted,
         }).await;
 
@@ -316,13 +314,13 @@ impl<D: DatabaseExt> PaymentStore for NotifyingDb<D> {
         Ok(())
     }
 
-    async fn update_payment_block(&self, payment_id: Uuid, block_num: u64, block_hash: String) -> DbResult<()> {
-        self.inner.update_payment_block(payment_id, block_num, block_hash.clone()).await?;
+    async fn update_payment_block(&self, payment_id: Uuid, block_num: u64, block_hash: &str) -> DbResult<()> {
+        self.inner.update_payment_block(payment_id, block_num, block_hash).await?;
 
         let _ = self.tx.send(DbEvent::PaymentBlockUpdated {
             payment_id,
             block_number: block_num,
-            block_hash,
+            block_hash: block_hash.to_string(),
         }).await;
 
         Ok(())
@@ -339,14 +337,12 @@ impl<D: DatabaseExt> WebhookStore for NotifyingDb<D> {
         self.inner.get_webhook(webhook_id).await
     }
 
-    async fn add_webhook(&self, webhook: &Webhook) -> DbResult<()> {
-        self.inner.add_webhook(webhook).await?;
+    async fn add_webhook(&self, webhook: Webhook) -> DbResult<Webhook> {
+        let wh = self.inner.add_webhook(webhook.clone()).await?;
 
-        let _ = self.tx.send(DbEvent::WebhookAdded {
-            webhook: webhook.clone()
-        }).await;
+        let _ = self.tx.send(DbEvent::WebhookAdded { webhook }).await;
 
-        Ok(())
+        Ok(wh)
     }
 
     async fn select_pending_webhooks(&self, limit: usize) -> DbResult<Vec<WebhookJob>> {

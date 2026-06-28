@@ -1,5 +1,5 @@
 use crate::model::FinalizedPaymentInfo;
-use necko3_types::{ChainData, InvoiceStatus, PaymentStatus, Webhook, WebhookEvent, WebhookStatus};
+use necko3_types::{ChainData, Invoice, InvoiceStatus, PaymentStatus, Webhook, WebhookEvent, WebhookStatus};
 use crate::traits::DatabaseStore;
 use async_trait::async_trait;
 use chrono::Utc;
@@ -70,7 +70,7 @@ pub trait DatabaseExt: DatabaseStore {
         Ok(self.get_token(chain_name, token_symbol).await?
             .map(|c| c.decimals))
     }
-    
+
     async fn get_symbol_decimals(&self, chain_name: &str, symbol: &str) -> DbResult<Option<u8>> {
         if let Some(chain) = self.get_chain(chain_name).await?
             && chain.native_symbol == symbol {
@@ -83,9 +83,8 @@ pub trait DatabaseExt: DatabaseStore {
     }
 
     // invoice
-    async fn cancel_invoice(&self, uuid: Uuid) -> DbResult<()> {
-        self.update_invoice_status(uuid, InvoiceStatus::Cancelled).await?;
-        Ok(())
+    async fn cancel_invoice(&self, uuid: Uuid) -> DbResult<Invoice> {
+        self.update_invoice_status(uuid, InvoiceStatus::Cancelled).await
     }
 
     async fn get_invoice_status(&self, uuid: Uuid) -> DbResult<Option<InvoiceStatus>> {
@@ -142,7 +141,7 @@ pub trait DatabaseExt: DatabaseStore {
         let mut skipped = Vec::new();
 
         for tx_hash in tx_hashes {
-            let payment = match self.get_payment_by_tx_hash(tx_hash.clone()).await? {
+            let payment = match self.get_payment_by_tx_hash(tx_hash).await? {
                 Some(p) => p,
                 None => {
                     skipped.push(tx_hash.to_string());
@@ -152,12 +151,12 @@ pub trait DatabaseExt: DatabaseStore {
 
             self.update_payment_status(payment.id, PaymentStatus::Pending).await?;
         }
-        
+
         Ok(skipped)
     }
 
     // webhook
-    async fn create_webhook_job(&self, invoice_id: Uuid, event: &WebhookEvent) -> DbResult<()> {
+    async fn create_webhook_job(&self, invoice_id: Uuid, event: WebhookEvent) -> DbResult<Option<Webhook>> {
         let invoice = self.get_invoice(invoice_id).await?
             .ok_or_else(|| DbError::NotFound {
                 entity: "Invoice",
@@ -166,7 +165,7 @@ pub trait DatabaseExt: DatabaseStore {
 
         let url = match invoice.webhook_url {
             Some(u) => u,
-            None => { return Ok(()) }
+            None => { return Ok(None) }
         };
 
         let now = Utc::now();
@@ -182,7 +181,7 @@ pub trait DatabaseExt: DatabaseStore {
             created_at: now,
         };
 
-        self.add_webhook(&webhook).await?;
-        Ok(())
+        let wh = self.add_webhook(webhook).await?;
+        Ok(Some(wh))
     }
 }

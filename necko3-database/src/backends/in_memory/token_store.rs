@@ -66,7 +66,7 @@ impl TokenStore for InMemoryAdapter {
         Ok(token)
     }
 
-    async fn add_token(&self, chain_name: &str, token_config: &TokenData) -> DbResult<TokenData> {
+    async fn add_token(&self, chain_name: &str, mut token_config: TokenData) -> DbResult<TokenData> {
         if !self.chains.read().contains_key(chain_name) {
             return Err(DbError::NotFound {
                 entity: "Chain",
@@ -76,7 +76,6 @@ impl TokenStore for InMemoryAdapter {
 
         let next_id = self.tokens_last_id.fetch_add(1, Ordering::SeqCst);
 
-        let mut token_config = token_config.clone();
         token_config.id = next_id;
 
         self.tokens.write()

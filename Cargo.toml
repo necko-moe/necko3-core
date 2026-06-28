@@ -24,6 +24,6 @@ thiserror = "2"
 
 serde = { version = "1", features = ["derive"] }
 
-necko3-types = { version = "0.2.3", path = "necko3-types" }
-necko3-database = { version = "0.2.3", path = "necko3-database" }
-necko3-blockchain = { version = "0.2.3", path = "necko3-blockchain" }
+necko3-types = { version = "0.2.4", path = "necko3-types" }
+necko3-database = { version = "0.2.4", path = "necko3-database" }
+necko3-blockchain = { version = "0.2.4", path = "necko3-blockchain" }

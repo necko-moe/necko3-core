@@ -56,11 +56,11 @@ where
 {
     pub async fn add_chain(self, chain_config: ChainConfig) -> DbResult<Self> {
         let (tokens, chain_data) = chain_config.into();
-
-        self.db.add_chain(&chain_data).await?;
+        let chain_name = chain_data.name.clone();
+        self.db.add_chain(chain_data).await?;
 
         for token in tokens {
-            self.db.add_token(&chain_data.name, &token).await?;
+            self.db.add_token(&chain_name, token).await?;
         }
 
         Ok(self)

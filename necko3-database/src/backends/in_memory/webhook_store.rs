@@ -44,9 +44,10 @@ impl WebhookStore for InMemoryAdapter {
         Ok(self.webhooks.get(&webhook_id).map(|x| x.value().clone()))
     }
 
-    async fn add_webhook(&self, webhook: &Webhook) -> DbResult<()> {
+    async fn add_webhook(&self, webhook: Webhook) -> DbResult<Webhook> {
         self.webhooks.insert(webhook.id, webhook.clone());
-        Ok(())
+
+        Ok(webhook)
     }
 
     async fn select_pending_webhooks(&self, limit: usize) -> DbResult<Vec<WebhookJob>> {

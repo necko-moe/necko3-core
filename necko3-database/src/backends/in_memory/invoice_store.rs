@@ -47,27 +47,25 @@ impl InvoiceStore for InMemoryAdapter {
             .map(|x| x.value().clone()))
     }
 
-    async fn add_invoice(&self, invoice: &Invoice) -> DbResult<()> {
+    async fn add_invoice(&self, invoice: Invoice) -> DbResult<Invoice> {
         self.invoices.insert(invoice.id.clone(), invoice.clone());
 
-        Ok(())
+        Ok(invoice)
     }
 
-    async fn update_invoice_status(&self, invoice_id: Uuid, status: InvoiceStatus) -> DbResult<()> {
-        if !self.invoices.contains_key(&invoice_id) {
-            return Err(DbError::NotFound {
-                entity: "Invoice",
-                id: invoice_id.to_string(),
-            })
-        }
-
+    async fn update_invoice_status(&self, invoice_id: Uuid, status: InvoiceStatus) -> DbResult<Invoice> {
         if let Some(mut invoice) = self.invoices
             .get_mut(&invoice_id) {
 
             invoice.status = status;
+            
+            return Ok(invoice.clone())
         }
 
-        Ok(())
+        Err(DbError::NotFound {
+            entity: "Invoice",
+            id: invoice_id.to_string(),
+        })
     }
 
     async fn get_invoice_by_address(&self, address: &str) -> DbResult<Option<Invoice>> {

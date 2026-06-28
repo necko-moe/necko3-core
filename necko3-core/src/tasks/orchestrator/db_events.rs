@@ -218,7 +218,7 @@ impl<D: DatabaseExt> NeckoOrchestrator<D> {
         &self,
         invoice: Invoice,
     ) {
-        match self.db.add_watch_address(&invoice.network, invoice.address).await {
+        match self.db.add_watch_address(&invoice.network, &invoice.address).await {
             Ok(true) => {}
             Ok(false) => {
                 warn!("Invoice added, but address to watch is already existing");
@@ -258,7 +258,7 @@ impl<D: DatabaseExt> NeckoOrchestrator<D> {
 
             self.handle_invoice_status_change(invoice_id, invoice.paid, new_status).await;
         } else {
-            match self.db.add_watch_address(&invoice.network, invoice.address).await {
+            match self.db.add_watch_address(&invoice.network, &invoice.address).await {
                 Ok(true) => {}
                 Ok(false) => {
                     warn!("Invoice status updated to Pending, but address to watch is already existing");
@@ -280,7 +280,7 @@ impl<D: DatabaseExt> NeckoOrchestrator<D> {
                 invoice_id: invoice.id,
             };
 
-            if let Err(e) = self.db.create_webhook_job(invoice.id, &webhook_job).await {
+            if let Err(e) = self.db.create_webhook_job(invoice.id, webhook_job).await {
                 warn!(error = %e, invoice_id = %invoice.id,
                             "Failed to create InvoiceExpired webhook job");
             }
@@ -368,6 +368,33 @@ impl<D: DatabaseExt> NeckoOrchestrator<D> {
         is_new_payment: bool,
     ) {
         if is_new_payment {
+            let invoice = match self.db.get_invoice_by_address(&payment.to).await {
+                Ok(Some(info)) => info,
+                Ok(None) => {
+                    debug!(payment_address = %payment.to,
+                    "Cannot find invoice for this payment address");
+
+                    return;
+                }
+                Err(e) => {
+                    warn!(error = %e, address = %payment.to, "Failed to get invoice by address");
+
+                    return;
+                }
+            };
+
+            let webhook_job = WebhookEvent::TxDetected {
+                invoice_id: invoice.id,
+                tx_hash: payment.tx_hash.clone(),
+                amount: payment.amount_human.clone(),
+                currency: payment.asset.clone().to_symbol(),
+            };
+
+            if let Err(e) = self.db.create_webhook_job(invoice.id, webhook_job).await {
+                warn!(error = %e, invoice_id = %invoice.id,
+                "Failed to create TxDetected webhook job");
+            }
+
             let event_data = Box::new(TransactionDetectedData {
                 db_transaction_id: payment_id,
                 tx_hash: payment.tx_hash.clone(),

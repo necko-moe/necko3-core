@@ -86,27 +86,31 @@ impl WebhookStore for PostgresAdapter {
             .transpose()
     }
 
-    async fn add_webhook(&self, webhook: &Webhook) -> DbResult<()> {
+    async fn add_webhook(&self, webhook: Webhook) -> DbResult<Webhook> {
         let event_type = webhook.payload.as_ref();
         let payload = serde_json::to_value(&webhook.payload)
             .map_err(|e| DbError::DataCorruption(
                 format!("Failed to serialize webhook payload: {}", e)))?;
 
         sqlx::query(
-            r#"INSERT INTO webhooks (id, invoice_id, event_type, url, payload, max_retries, status)
-                       VALUES ($1, $2, $3, $4, $5, $6, $7)"#
+            r#"INSERT INTO webhooks (id, invoice_id, event_type, url, payload, 
+                      attempts, max_retries, status, next_retry, created_at)
+                   VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)"#
         )
             .bind(webhook.id)
             .bind(webhook.invoice_id)
             .bind(event_type)
             .bind(&webhook.url)
             .bind(payload)
+            .bind(webhook.attempts as i32)
             .bind(webhook.max_retries as i32)
             .bind(webhook.status.to_string())
+            .bind(webhook.next_retry)
+            .bind(webhook.created_at)
             .execute(&self.pool)
             .await?;
 
-        Ok(())
+        Ok(webhook)
     }
 
     async fn select_pending_webhooks(&self, limit: usize) -> DbResult<Vec<WebhookJob>> {

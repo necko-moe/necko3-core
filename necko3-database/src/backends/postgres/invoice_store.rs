@@ -96,7 +96,7 @@ impl InvoiceStore for PostgresAdapter {
             .transpose()
     }
 
-    async fn add_invoice(&self, invoice: &Invoice) -> DbResult<()> {
+    async fn add_invoice(&self, invoice: Invoice) -> DbResult<Invoice> {
         let amount_bd = BigDecimal::from_str(&invoice.amount_raw.to_string())
             .map_err(|e| DbError::DataCorruption(
                 format!("Failed to parse amount_raw ({}) as BigDecimal: {}", invoice.amount_raw, e)))?;
@@ -133,26 +133,28 @@ impl InvoiceStore for PostgresAdapter {
                 other => DbError::from(other),
             })?;
 
-        Ok(())
+        Ok(invoice)
     }
 
-    async fn update_invoice_status(&self, invoice_id: Uuid, status: InvoiceStatus) -> DbResult<()> {
-        let res = sqlx::query(
-            "UPDATE invoices SET status = $1 WHERE id = $2"
+    async fn update_invoice_status(&self, invoice_id: Uuid, status: InvoiceStatus) -> DbResult<Invoice> {
+        let row_opt = sqlx::query(
+            r#"UPDATE invoices SET status = $1 WHERE id = $2
+                   RETURNING id, address, address_index, network, token, amount_raw::TEXT, paid_raw::TEXT,
+                       status, decimals, created_at, expires_at, webhook_url, webhook_secret, webhook_max_retries"#
         )
             .bind(status.to_string())
             .bind(invoice_id)
-            .execute(&self.pool)
+            .fetch_optional(&self.pool)
             .await?;
 
-        if res.rows_affected() == 0 {
+        let Some(row) = row_opt else {
             return Err(DbError::NotFound {
                 entity: "Invoice",
                 id: invoice_id.to_string(),
             });
-        }
-        
-        Ok(())
+        };
+
+        Self::map_row_to_invoice(row)
     }
 
     async fn get_invoice_by_address(&self, address: &str) -> DbResult<Option<Invoice>> {

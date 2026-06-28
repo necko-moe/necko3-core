@@ -21,10 +21,9 @@ impl ChainStore for InMemoryAdapter {
             .cloned())
     }
 
-    async fn add_chain(&self, chain_config: &ChainData) -> DbResult<ChainData> {
+    async fn add_chain(&self, mut chain_config: ChainData) -> DbResult<ChainData> {
         let next_id = self.chains_last_id.fetch_add(1, Ordering::SeqCst);
 
-        let mut chain_config = chain_config.clone();
         chain_config.id = next_id;
         
         self.chains.write()
@@ -51,7 +50,7 @@ impl ChainStore for InMemoryAdapter {
         Ok(self.chains.read().contains_key(chain_name))
     }
 
-    async fn update_chain_partial(&self, chain_name: &str, chain_update: &PartialChainUpdate) -> DbResult<()> {
+    async fn update_chain_partial(&self, chain_name: &str, chain_update: PartialChainUpdate) -> DbResult<ChainData> {
         let mut guard = self.chains.write();
 
         let chain = guard
@@ -63,7 +62,7 @@ impl ChainStore for InMemoryAdapter {
 
         chain.patch(chain_update);
 
-        Ok(())
+        Ok(chain.clone())
     }
 
     async fn update_chain_active(&self, chain_name: &str, active: bool) -> DbResult<()> {
@@ -100,7 +99,7 @@ impl ChainStore for InMemoryAdapter {
         Ok(())
     }
 
-    async fn add_watch_address(&self, chain_name: &str, address: String) -> DbResult<bool> {
+    async fn add_watch_address(&self, chain_name: &str, address: &str) -> DbResult<bool> {
         if !self.chains.read().contains_key(chain_name) {
             return Err(DbError::NotFound {
                 entity: "Chain",
@@ -111,7 +110,7 @@ impl ChainStore for InMemoryAdapter {
         if let Some(chain) = self.chains.write()
             .get_mut(chain_name) {
 
-            let added = chain.watch_addresses.insert(address);
+            let added = chain.watch_addresses.insert(address.to_string());
             Ok(added)
         } else { Ok(false) }
     }

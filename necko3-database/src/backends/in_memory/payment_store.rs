@@ -47,7 +47,7 @@ impl PaymentStore for InMemoryAdapter {
             .map(|x| x.value().clone()))
     }
 
-    async fn get_payment_by_tx_hash(&self, tx_hash: String) -> DbResult<Option<Payment>> {
+    async fn get_payment_by_tx_hash(&self, tx_hash: &str) -> DbResult<Option<Payment>> {
         Ok(self.payments.iter()
             .find(|payment|
                 payment.value().tx_hash == tx_hash)
@@ -62,7 +62,7 @@ impl PaymentStore for InMemoryAdapter {
             .collect())
     }
 
-    async fn upsert_payment(&self, upsert: &UpsertPayment) -> DbResult<(Uuid, bool)> {
+    async fn upsert_payment(&self, upsert: UpsertPayment) -> DbResult<(Uuid, bool)> {
         if let Some(mut existing) = self.payments.iter_mut()
             .find(|x| {
                 let pay = x.value();
@@ -103,7 +103,7 @@ impl PaymentStore for InMemoryAdapter {
         Ok(())
     }
 
-    async fn update_payment_block(&self, payment_id: Uuid, block_num: u64, block_hash: String) -> DbResult<()> {
+    async fn update_payment_block(&self, payment_id: Uuid, block_num: u64, block_hash: &str) -> DbResult<()> {
         if !self.payments.contains_key(&payment_id) {
             return Err(DbError::NotFound {
                 entity: "Payment",
@@ -115,7 +115,7 @@ impl PaymentStore for InMemoryAdapter {
             .get_mut(&payment_id) {
             
             payment.block_number = block_num;
-            payment.block_hash = block_hash;
+            payment.block_hash = block_hash.to_string();
         }
 
         Ok(())

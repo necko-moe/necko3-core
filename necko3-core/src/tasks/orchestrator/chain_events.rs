@@ -1,8 +1,8 @@
 use alloy_primitives::BlockNumber;
-use tracing::{debug, error, warn};
+use tracing::{error, warn};
 use necko3_database::traits::DatabaseExt;
 use necko3_types::blockchain::ChainEvent;
-use necko3_types::{PaymentStatus, UpsertPayment, WebhookEvent};
+use necko3_types::{PaymentStatus, UpsertPayment};
 use crate::tasks::orchestrator::{NeckoOrchestrator, PaymentDetails};
 use crate::types::{CoreEvent, NeckoEvent};
 
@@ -27,7 +27,9 @@ impl<D: DatabaseExt> NeckoOrchestrator<D> {
                     required_confirmations,
                 };
 
-                self.handle_payment_detected(new_payment).await;
+                if let Err(e) = self.db.upsert_payment(new_payment).await {
+                    warn!(error = %e, "Failed to upsert payment");
+                }
             }
             ChainEvent::PaymentReorged { tx_hash, new_block_number, new_block_hash, .. } => {
                 self.handle_payment_reorged(tx_hash, new_block_number, new_block_hash).await;
@@ -55,49 +57,13 @@ impl<D: DatabaseExt> NeckoOrchestrator<D> {
         }
     }
 
-    async fn handle_payment_detected(
-        &self,
-        payment: UpsertPayment,
-    ) {
-        if let Err(e) = self.db.upsert_payment(&payment).await {
-            warn!(error = %e, "Failed to upsert payment");
-        }
-
-        let invoice = match self.db.get_invoice_by_address(&payment.to).await {
-            Ok(Some(info)) => info,
-            Ok(None) => {
-                debug!(payment_address = %payment.to,
-                            "Cannot find invoice for this payment address");
-
-                return;
-            }
-            Err(e) => {
-                warn!(error = %e, address = %payment.to, "Failed to get invoice by address");
-
-                return;
-            }
-        };
-
-        let webhook_job = WebhookEvent::TxDetected {
-            invoice_id: invoice.id,
-            tx_hash: payment.tx_hash,
-            amount: payment.amount_human,
-            currency: payment.asset.to_symbol(),
-        };
-
-        if let Err(e) = self.db.create_webhook_job(invoice.id, &webhook_job).await {
-            warn!(error = %e, invoice_id = %invoice.id,
-                "Failed to create TxDetected webhook job");
-        }
-    }
-
     async fn handle_payment_reorged(
         &self,
         tx_hash: String,
         new_block_number: u64,
         new_block_hash: String
     ) {
-        let payment = match self.db.get_payment_by_tx_hash(tx_hash.clone()).await {
+        let payment = match self.db.get_payment_by_tx_hash(&tx_hash).await {
             Ok(Some(p)) => p,
             Ok(None) => {
                 error!(tx_hash,
@@ -112,7 +78,7 @@ impl<D: DatabaseExt> NeckoOrchestrator<D> {
         };
 
         if let Err(e) = self.db.update_payment_block(
-            payment.id, new_block_number, new_block_hash.clone()).await
+            payment.id, new_block_number, &new_block_hash).await
         {
             warn!(error = %e, payment_id = %payment.id, "Failed to update payment block");
         }
@@ -136,7 +102,7 @@ impl<D: DatabaseExt> NeckoOrchestrator<D> {
         block_hash: String,
         confirmed_after: u64,
     ) {
-        let payment = match self.db.get_payment_by_tx_hash(tx_hash.clone()).await {
+        let payment = match self.db.get_payment_by_tx_hash(&tx_hash).await {
             Ok(Some(p)) => p,
             Ok(None) => {
                 error!(tx_hash,
@@ -164,7 +130,7 @@ impl<D: DatabaseExt> NeckoOrchestrator<D> {
         &self,
         tx_hash: String,
     ) {
-        let payment = match self.db.get_payment_by_tx_hash(tx_hash.clone()).await {
+        let payment = match self.db.get_payment_by_tx_hash(&tx_hash).await {
             Ok(Some(p)) => p,
             Ok(None) => {
                 error!(tx_hash,

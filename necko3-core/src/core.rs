@@ -123,10 +123,11 @@ where
 
     pub async fn add_chain(&self, chain_config: ChainConfig) -> DbResult<ChainData> {
         let (tokens, chain_data) = chain_config.into();
-        let data = self.db.add_chain(&chain_data).await?;
+        let chain_name = chain_data.name.clone();
+        let data = self.db.add_chain(chain_data).await?;
 
         for token in tokens {
-            self.db.add_token(&chain_data.name, &token).await?;
+            self.db.add_token(&chain_name, token).await?;
         }
 
         Ok(data)
@@ -134,7 +135,7 @@ where
 
     pub async fn add_token(&self, chain_name: impl Into<String>, token: TokenConfig) -> DbResult<TokenData> {
         let token = token.into();
-        self.db.add_token(&chain_name.into(), &token).await
+        self.db.add_token(&chain_name.into(), token).await
     }
 
     pub async fn create_invoice(
@@ -255,9 +256,9 @@ where
             status: InvoiceStatus::Pending,
         };
 
-        self.db.add_invoice(&invoice).await?;
+        let inv = self.db.add_invoice(invoice).await?;
 
-        Ok(invoice)
+        Ok(inv)
     }
 }
 

@@ -30,7 +30,7 @@ pub struct ChainData {
 }
 
 impl ChainData {
-    pub fn patch(&mut self, update: &PartialChainUpdate) {
+    pub fn patch(&mut self, update: PartialChainUpdate) {
         if let Some(x) = update.active { self.active = x; }
         if let Some(x) = &update.rpc_urls { self.rpc_urls = x.to_owned(); }
         if let Some(x) = update.last_processed_block { self.last_processed_block = x; }
